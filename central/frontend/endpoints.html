@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h3 class="mb-4"><i class="fa-solid fa-diagram-project me-2"></i>Worker Node Endpoints</h3>
+
+<h5 class="mt-4 mb-3 text-warning"><i class="fa-solid fa-clock me-2"></i>Pending Registration</h5>
+<div class="row mb-5" id="pending-endpoints-container">
+    <!-- Populated by JS -->
+</div>
+
+<h5 class="mt-4 mb-3 text-success"><i class="fa-solid fa-circle-check me-2"></i>Active Endpoints</h5>
+<div class="row mb-5" id="active-endpoints-container">
+    <!-- Populated by JS -->
+</div>
+{% endblock %}

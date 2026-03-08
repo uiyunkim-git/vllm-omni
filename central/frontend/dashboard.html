@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h3 class="mb-3"><i class="fa-solid fa-network-wired me-2"></i>Active Deployments</h3>
+<div class="table-responsive mb-5 bg-white p-3 rounded shadow-sm">
+    <table class="table table-striped table-hover align-middle mb-0">
+        <thead class="table-light">
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Model</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>GPUs</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="deployments-table-body">
+            <!-- Populated by JS -->
+        </tbody>
+    </table>
+</div>
+
+<h3 class="mb-3"><i class="fa-solid fa-microchip me-2"></i>Global GPU Status</h3>
+<div class="row mb-5" id="gpu-cards-container">
+    <!-- Populated by JS -->
+</div>
+
+{% endblock %}

@@ -1,0 +1,40 @@
+global
+    maxconn 200000
+
+defaults
+    mode http
+    option http-server-close
+    timeout connect 2000ms
+    timeout client 3600s
+    timeout server 3600s
+    retries 10
+
+frontend http_front
+    bind *:80
+    maxconn 200000
+    
+    # ACLs
+    acl is_api path_beg /v1
+    acl is_health path_beg /health
+    
+    # Routing
+    use_backend http_back if is_api
+    use_backend http_back if is_health
+    default_backend dashboard_back
+
+backend http_back
+    balance leastconn
+    option httpchk GET /health
+{% for upstream in upstreams %}
+    server upstream_{{ loop.index }} {{ upstream.host }}:{{ upstream.port }} check inter 5s rise 2 fall 3 maxconn 8192 init-addr last,libc,none
+{% endfor %}
+
+backend dashboard_back
+    balance roundrobin
+    server dashboard central:8080 check
+
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 5s

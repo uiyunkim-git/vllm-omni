@@ -1,0 +1,105 @@
+<div class="modal fade" id="deployModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Deploy New Model</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="deployForm">
+                    <div class="mb-3 p-3 bg-light border border-info rounded">
+                        <label class="form-label fw-bold text-info-emphasis"><i
+                                class="fa-solid fa-file-import me-2"></i>Load from Saved Configuration</label>
+                        <select class="form-select form-select-sm" id="configSelector" onchange="applySelectedConfig()">
+                            <option value="">-- Select a Config (Optional) --</option>
+                        </select>
+                        <div class="form-text mt-2"><i class="fa-solid fa-circle-info me-1"></i>Selecting a saved config
+                            will auto-fill the entire form below.</div>
+                    </div>
+                    <hr class="text-muted">
+                    <div class="mb-3">
+                        <label class="form-label">Deployment Name</label>
+                        <input type="text" class="form-control" id="deployName" required
+                            placeholder="e.g., prod-llama-3">
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label">HF Model ID</label>
+                            <input type="text" class="form-control" id="deployModel" required
+                                placeholder="meta-llama/Meta-Llama-3-8B-Instruct">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Serving Type</label>
+                            <div class="mb-2">
+                                <div class="form-check mb-1">
+                                    <input class="form-check-input" type="radio" name="deployType" id="typeReplicas"
+                                        value="replicas" checked onchange="toggleDeployModeUI()">
+                                    <label class="form-check-label" for="typeReplicas">Independent Replicas <br><small
+                                            class="text-muted">Spawns 1 container per selected GPU, load
+                                            balanced.</small></label>
+                                </div>
+                                <div class="form-check mb-1">
+                                    <input class="form-check-input" type="radio" name="deployType" id="typeTp"
+                                        value="tp" onchange="toggleDeployModeUI()">
+                                    <label class="form-check-label" for="typeTp">Tensor Parallelism <br><small
+                                            class="text-muted">A single massive container striped across X
+                                            GPUs.</small></label>
+                                </div>
+                            </div>
+                            <div class="form-check form-switch mt-3">
+                                <input class="form-check-input" type="checkbox" id="deployIsEmbedding">
+                                <label class="form-check-label" for="deployIsEmbedding">Is Embedding Model?</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="tpNodeSelector" class="mb-3" style="display: none;">
+                        <label class="form-label">Select Target Node</label>
+                        <select class="form-select" id="deployTargetNode" onchange="filterGpusByNode()">
+                            <option value="">-- Select a Node --</option>
+                            <!-- Populated by JS -->
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Select GPUs</label>
+                        <div id="deployGpusGrid" class="d-flex flex-wrap gap-2 mb-2 p-2 border rounded bg-light"
+                            style="max-height: 200px; overflow-y: auto;">
+                            <!-- Populated by JS -->
+                        </div>
+                        <div class="form-text" id="deployGpusHelp">Select multiple GPUs. Each selected GPU
+                            will run a separate 1-GPU replica.</div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-4" id="tpDisplayContainer" style="display: none;">
+                            <label class="form-label">Calculated TP</label>
+                            <input type="number" class="form-control" id="deployTp" value="1" disabled>
+                            <div class="form-text text-warning" id="tpWarningText" style="display: none;">Must be 1, 2,
+                                4, or 8 GPUs.</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Max Model Length</label>
+                            <input type="number" class="form-control" id="deployMaxLen" placeholder="Optional">
+                            <div class="form-text">Leave blank for default</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">GPU Memory Utilization</label>
+                            <input type="number" class="form-control" id="deployGpuUtil" value="0.9" step="0.05"
+                                min="0.1" max="1.0">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Additional vLLM Arguments</label>
+                        <input type="text" class="form-control" id="deployExtraArgs"
+                            placeholder="e.g., --trust-remote-code --max-num-seqs 64">
+                        <div class="form-text">Arbitrary command-line flags passed directly to the vLLM engine.</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="triggerSaveConfig()">Save Config</button>
+                <button type="button" class="btn btn-primary" onclick="submitDeployment()">Deploy</button>
+            </div>
+        </div>
+    </div>
+</div>

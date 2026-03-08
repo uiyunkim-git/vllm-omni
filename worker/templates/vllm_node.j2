@@ -1,0 +1,64 @@
+version: '3.9'
+
+services:
+  {{ node_name }}:
+    image: vllm/vllm-openai:latest
+    container_name: {{ node_name }}
+    restart: unless-stopped
+    environment:
+      - VLLM_NO_USAGE_STATS=1
+      - DO_NOT_TRACK=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+{% if huggingface_token %}
+      - HUGGING_FACE_HUB_TOKEN={{ huggingface_token }}
+{% endif %}
+    ipc: host
+    shm_size: '16gb'
+    ports:
+      - "{{ port + 40000 }}:8000"
+    volumes:
+      - "{{ host_cache_dir }}:/root/.cache/huggingface"
+      - "{{ host_cert_path }}:/app/vllm.crt:ro"
+      - "{{ host_key_path }}:/app/vllm.key:ro"
+    command:
+      - --model
+      - "{{ model_name }}"
+      - --ssl-keyfile
+      - "/app/vllm.key"
+      - --ssl-certfile
+      - "/app/vllm.crt"
+{% if task == 'embed' %}
+      - --task
+      - embed
+{% endif %}
+{% if tensor_parallel_size > 1 %}
+      - --tensor-parallel-size
+      - "{{ tensor_parallel_size }}"
+{% endif %}
+{% if max_model_len %}
+      - --max-model-len
+      - "{{ max_model_len }}"
+{% endif %}
+{% if gpu_memory_util %}
+      - --gpu-memory-utilization
+      - "{{ gpu_memory_util }}"
+{% endif %}
+{% if extra_args %}
+{% for arg in extra_args %}
+      - "{{ arg }}"
+{% endfor %}
+{% endif %}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: {{ gpu_ids | tojson }}
+    networks:
+      - vllm_network
+
+networks:
+  vllm_network:
+    external: true
+    name: vllm_default

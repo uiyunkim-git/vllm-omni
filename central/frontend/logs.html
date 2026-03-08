@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logs - {{ deploy_id }}</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #log-header {
+            background-color: #252526;
+            padding: 10px 20px;
+            border-bottom: 1px solid #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #log-container {
+            flex-grow: 1;
+            padding: 20px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .text-magenta {
+            color: #d16969;
+        }
+
+        .text-cyan {
+            color: #4dc9b0;
+        }
+
+        .text-yellow {
+            color: #dcdcaa;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="log-header">
+        <div>
+            <h5 class="mb-0 text-light"><i class="fa-solid fa-terminal text-success me-2"></i>Live Logs: <span
+                    class="text-info">{{ deploy_id }}</span></h5>
+            <small class="text-muted" id="status-text">Connecting to log stream...</small>
+        </div>
+        <div>
+            <div class="form-check form-switch d-inline-block me-3">
+                <input class="form-check-input" type="checkbox" id="autoScrollCheck" checked>
+                <label class="form-check-label text-light small" for="autoScrollCheck">Auto-Scroll</label>
+            </div>
+            <button class="btn btn-sm btn-outline-light" onclick="window.close()"><i class="fa-solid fa-xmark"></i>
+                Close</button>
+        </div>
+    </div>
+
+    <div id="tab-container" class="bg-dark px-3 pt-2" style="display: none;">
+        <ul class="nav nav-tabs border-bottom-0" id="containerTabs" role="tablist">
+            <!-- Tabs injected dynamically -->
+        </ul>
+    </div>
+
+    <div id="log-container">Loading data...</div>
+
+    <script>
+        const deployId = "{{ deploy_id }}";
+        const container = document.getElementById('log-container');
+        const statusText = document.getElementById('status-text');
+        const autoScroll = document.getElementById('autoScrollCheck');
+
+        let source = null;
+        let isFirstMessage = true;
+        let currentContainer = null;
+        let reconnectTimeout = null;
+
+        async function init() {
+            try {
+                const res = await fetch('/api/deployments');
+                const deps = await res.json();
+                const currentDep = deps.find(d => d.id === deployId);
+
+                if (!currentDep || !currentDep.nodes || currentDep.nodes.length === 0) {
+                    container.textContent = "Deployment not found or has no active nodes.";
+                    return;
+                }
+
+                if (currentDep.deployment_type === 'replicas' && currentDep.nodes.length > 1) {
+                    document.getElementById('tab-container').style.display = 'block';
+                    const tabsUl = document.getElementById('containerTabs');
+
+                    currentDep.nodes.forEach((node, index) => {
+                        const li = document.createElement('li');
+                        li.className = 'nav-item';
+
+                        const a = document.createElement('a');
+                        a.className = `nav-link ${index === 0 ? 'active' : ''}`;
+                        a.href = '#';
+                        a.textContent = node.name;
+                        a.style.cursor = 'pointer';
+
+                        // Dark theme active color styling override inline
+                        if (index === 0) {
+                            a.style.backgroundColor = '#1e1e1e';
+                            a.style.color = '#fff';
+                            a.style.borderColor = '#333 #333 #1e1e1e';
+                        } else {
+                            a.style.color = '#aaa';
+                        }
+
+                        a.onclick = (e) => {
+                            e.preventDefault();
+                            // Reset styling for all tabs
+                            Array.from(tabsUl.querySelectorAll('.nav-link')).forEach(link => {
+                                link.classList.remove('active');
+                                link.style.backgroundColor = '';
+                                link.style.color = '#aaa';
+                                link.style.borderColor = '';
+                            });
+
+                            // Set styling for active tab
+                            a.classList.add('active');
+                            a.style.backgroundColor = '#1e1e1e';
+                            a.style.color = '#fff';
+                            a.style.borderColor = '#333 #333 #1e1e1e';
+
+                            switchContainer(node.name);
+                        };
+
+                        li.appendChild(a);
+                        tabsUl.appendChild(li);
+                    });
+
+                    // Connect to the first container initially
+                    switchContainer(currentDep.nodes[0].name);
+                } else {
+                    // TP or single node replica: just connect without tabs
+                    switchContainer(null);
+                }
+            } catch (err) {
+                container.textContent = "Error fetching deployment details: " + err;
+            }
+        }
+
+        function switchContainer(targetContainer) {
+            currentContainer = targetContainer;
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            connectSSE();
+        }
+
+        function connectSSE() {
+            if (source) {
+                source.close();
+            }
+
+            statusText.textContent = "Connecting to log stream...";
+            container.textContent = "Loading logs...\n";
+            isFirstMessage = true;
+
+            let url = `/api/deployments/${deployId}/logs`;
+            if (currentContainer) {
+                url += `?container_name=${currentContainer}`;
+            }
+
+            source = new EventSource(url);
+
+            source.onopen = function (event) {
+                statusText.textContent = `Connected (Streaming live${currentContainer ? ' - ' + currentContainer : ''})`;
+            };
+
+            source.onmessage = function (event) {
+                if (isFirstMessage) {
+                    container.textContent = "";
+                    isFirstMessage = false;
+                }
+
+                // Append the incoming stream chunk directly to the pre-wrap container
+                const node = document.createTextNode(event.data + "\n");
+                container.appendChild(node);
+
+                // Prune old logs if page gets too heavy (e.g. > 5,000 lines)
+                if (container.childNodes.length > 5000) {
+                    for (let i = 0; i < 1000; i++) {
+                        container.removeChild(container.firstChild);
+                    }
+                }
+
+                if (autoScroll.checked) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            };
+
+            source.onerror = function (event) {
+                statusText.textContent = "Connection lost. Reconnecting...";
+                source.close();
+                // Attempt to reconnect after a delay
+                reconnectTimeout = setTimeout(connectSSE, 3000);
+            };
+        }
+
+        // Boot
+        init();
+    </script>
+</body>
+
+</html>

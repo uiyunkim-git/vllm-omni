@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h3><i class="fa-solid fa-bookmark me-2"></i>Saved Configurations</h3>
+    <button class="btn btn-outline-secondary" onclick="exportConfigs()">Export DB</button>
+</div>
+<div class="row" id="saved-configs-container">
+    <!-- Populated by JS -->
+</div>
+{% endblock %}

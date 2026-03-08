@@ -1,0 +1,97 @@
+litellm_settings:
+  drop_params: True
+  set_verbose: True
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+
+model_list:
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.74.105:8007/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.74.105:8008/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.74.105:8009/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.74.105:8010/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.74.105:8011/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.33.97:8001/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.33.97:8002/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.33.97:8003/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.33.97:8004/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.31.96:8001/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.31.96:8002/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.31.96:8003/v1
+      api_key: "sk-no-key"
+
+  - model_name: openai/gpt-oss-120b
+    litellm_params:
+      model: openai/openai/gpt-oss-120b
+      api_base: http://143.248.31.96:8004/v1
+      api_key: "sk-no-key"
+
+  - model_name: Qwen/Qwen3-Embedding-0.6B
+    litellm_params:
+      model: openai/Qwen/Qwen3-Embedding-0.6B
+      api_base: http://143.248.31.96:8005/v1
+      api_key: "sk-no-key"
+
+  - model_name: Qwen/Qwen3-Embedding-0.6B
+    litellm_params:
+      model: openai/Qwen/Qwen3-Embedding-0.6B
+      api_base: http://143.248.33.97:8005/v1
+      api_key: "sk-no-key"
+

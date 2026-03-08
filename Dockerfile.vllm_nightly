@@ -1,0 +1,10 @@
+FROM vllm/vllm-openai:cu130-nightly
+
+# Install git so we can install transformers from source if needed
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip (or use uv)
+RUN pip install uv
+
+# Upgrade transformers from source directly
+RUN uv pip install --system git+https://github.com/huggingface/transformers.git --upgrade

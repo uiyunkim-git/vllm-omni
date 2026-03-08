@@ -1,0 +1,13 @@
+litellm_settings:
+  drop_params: True
+  set_verbose: True
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+
+model_list:
+{% for upstream in upstreams %}
+  - model_name: {{ upstream.model }}
+    litellm_params:
+      model: openai/{{ upstream.model }}
+      api_base: http://{{ upstream.host }}:{{ upstream.port }}/v1
+      api_key: "sk-no-key"
+{% endfor %}

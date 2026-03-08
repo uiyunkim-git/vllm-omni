@@ -1,0 +1,27 @@
+version: '3.9'
+
+services:
+  worker:
+    build:
+      context: ./worker
+    container_name: vllm_omni_worker_1
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    env_file: .env.worker
+    environment:
+      - HOST_DATA_DIR=${PWD}/worker/data
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./worker/main.py:/app/main.py
+      - ./worker/manager.py:/app/manager.py
+      - ./worker/templates:/app/templates
+      - ./worker/data:/app/data
+      - /home/uiyunkim/.cache/huggingface:/home/uiyunkim/.cache/huggingface
+    networks:
+      - vllm_network
+
+networks:
+  vllm_network:
+    external: true
+    name: vllm_default

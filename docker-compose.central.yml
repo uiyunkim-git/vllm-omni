@@ -1,0 +1,39 @@
+version: '3.9'
+
+services:
+  vllm_router:
+    build:
+      context: ./central/go_proxy
+    container_name: vllm_omni_proxy
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PORT:-11434}:4000"
+    volumes:
+      - ./central/go_proxy/config.json:/app/config.json
+    networks:
+      - vllm_network
+
+  central:
+    build:
+      context: ./central
+    container_name: vllm_omni_central
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env.central
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./central/main.py:/app/main.py
+      - ./central/manager.py:/app/manager.py
+      - ./central/go_proxy:/app/go_proxy_config
+      - ./central/templates:/app/templates
+      - ./central/frontend/static:/app/frontend/static
+      - ./central/frontend:/app/frontend
+      - ./central/data:/app/data
+    networks:
+      - vllm_network
+
+networks:
+  vllm_network:
+    external: true
+    name: vllm_default
