@@ -438,7 +438,7 @@ class CentralManager:
         deps = self.load_deployments()
         changed = False
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client:
             for dep in deps:
                 if dep["status"] not in ["running", "starting"]:
                     continue
@@ -448,12 +448,13 @@ class CentralManager:
                     host = node["host"]
                     # Calculate the API port. Usually port + 40000
                     api_port = node["port"] + 40000
-                    health_url = f"http://{host}:{api_port}/health"
+                    health_url = f"https://{host}:{api_port}/health"
 
                     try:
                         resp = await client.get(health_url, timeout=2.0)
                         is_healthy = resp.status_code == 200
-                    except Exception:
+                    except Exception as e:
+                        # logger.error(f"Health check failed for {health_url}: {e}")
                         is_healthy = False
                     
                     if node.get("is_healthy") != is_healthy:
