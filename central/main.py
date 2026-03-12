@@ -9,6 +9,7 @@ import logging
 import httpx
 import json
 import random
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,6 +24,7 @@ class DeployRequest(BaseModel):
     deployment_type: str # "replicas" or "tp"
     is_embedding: bool
     model: str
+    served_model_name: Optional[str] = None
     gpus: List[str] # Global GPU IDs e.g., ["alpha-worker-1-0", "alpha-worker-1-1"]
     tp: int = 1
     max_len: Optional[int] = None
@@ -128,4 +130,16 @@ async def get_deployment_logs(deploy_id: str, container_name: Optional[str] = No
 async def register_node(req: RegisterNodeRequest):
     manager.register_worker(req.worker_id, req.host, req.port, req.gpus)
     return {"status": "ok"}
+
+async def health_check_loop():
+    while True:
+        try:
+            await manager.run_health_checks()
+        except Exception as e:
+            logging.error(f"Error in health check loop: {e}")
+        await asyncio.sleep(10)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(health_check_loop())
 

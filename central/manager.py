@@ -158,6 +158,7 @@ class CentralManager:
                 "id": r["id"],
                 "name": r["name"],
                 "model": r["model"],
+                "served_model_name": r.get("served_model_name") or r["model"],
                 "deployment_type": r["deployment_type"],
                 "is_embedding": bool(r["is_embedding"]),
                 "status": r["status"],
@@ -173,9 +174,9 @@ class CentralManager:
         cursor.execute("DELETE FROM deployments")
         for d in deps:
             cursor.execute('''
-                INSERT INTO deployments (id, name, model, deployment_type, is_embedding, status, gpus_json, nodes_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (d["id"], d["name"], d["model"], d["deployment_type"], int(d["is_embedding"]), d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
+                INSERT INTO deployments (id, name, model, served_model_name, deployment_type, is_embedding, status, gpus_json, nodes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d["deployment_type"], int(d["is_embedding"]), d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
         conn.commit()
         conn.close()
 
@@ -207,6 +208,7 @@ class CentralManager:
             "deployment_type": req["deployment_type"],
             "is_embedding": req["is_embedding"],
             "model": req["model"],
+            "served_model_name": req.get("served_model_name") or req["model"],
             "gpus": req["gpus"],
             "tp": req["tp"],
             "status": "starting",
@@ -234,6 +236,7 @@ class CentralManager:
                             "name": req["name"],
                             "is_embedding": req["is_embedding"],
                             "model": req["model"],
+                            "served_model_name": req.get("served_model_name") or req["model"],
                             "gpus": [gid], # ONLY send one GPU
                             "tp": 1,
                             "max_len": req.get("max_len"),
@@ -250,7 +253,8 @@ class CentralManager:
                             dep["nodes"].append({
                                 "name": node["name"],
                                 "host": worker["host"],
-                                "port": node["port"]
+                                "port": node["port"],
+                                "is_healthy": False
                             })
                             
             elif req["deployment_type"] == "tp":
@@ -270,6 +274,7 @@ class CentralManager:
                     "name": req["name"],
                     "is_embedding": req["is_embedding"],
                     "model": req["model"],
+                    "served_model_name": req.get("served_model_name") or req["model"],
                     "gpus": gpus, # Send ALL selected GPUs
                     "tp": len(gpus), # Explicitly set TP to GPU count
                     "max_len": req.get("max_len"),
@@ -286,7 +291,8 @@ class CentralManager:
                     dep["nodes"].append({
                         "name": node["name"],
                         "host": worker["host"],
-                        "port": node["port"]
+                        "port": node["port"],
+                        "is_healthy": False
                     })
         
         dep["status"] = "running"
@@ -404,14 +410,15 @@ class CentralManager:
         models_map = {}
         for d in deps:
             if d.get("status") == "running" and d.get("deployment_type") != "embeddings": # Only active running
-                model_name = d.get("model", "default_model")
+                model_name = d.get("served_model_name") or d.get("model", "default_model")
                 if model_name not in models_map:
                     models_map[model_name] = []
                 for node in d.get("nodes", []):
-                    models_map[model_name].append({
-                        "host": node["host"],
-                        "port": node["port"] + 40000
-                    })
+                    if node.get("is_healthy"):
+                        models_map[model_name].append({
+                            "host": node["host"],
+                            "port": node["port"] + 40000
+                        })
         
         config_data = {
             "auth_token": os.environ.get("VLLM_API_KEY", "bislaprom3#"),
@@ -426,3 +433,41 @@ class CentralManager:
             
         # Hot reload without dropping connections
         subprocess.run(["curl", "-X", "POST", "http://vllm_omni_proxy:4000/reload"], check=False)
+
+    async def run_health_checks(self):
+        deps = self.load_deployments()
+        changed = False
+
+        async with httpx.AsyncClient() as client:
+            for dep in deps:
+                if dep["status"] not in ["running", "starting"]:
+                    continue
+
+                all_healthy = True
+                for node in dep.get("nodes", []):
+                    host = node["host"]
+                    # Calculate the API port. Usually port + 40000
+                    api_port = node["port"] + 40000
+                    health_url = f"http://{host}:{api_port}/health"
+
+                    try:
+                        resp = await client.get(health_url, timeout=2.0)
+                        is_healthy = resp.status_code == 200
+                    except Exception:
+                        is_healthy = False
+                    
+                    if node.get("is_healthy") != is_healthy:
+                        node["is_healthy"] = is_healthy
+                        changed = True
+
+                    if not is_healthy:
+                        all_healthy = False
+
+                # If all nodes are healthy, mark dep as running securely
+                if all_healthy and dep["status"] == "starting":
+                    dep["status"] = "running"
+                    changed = True
+
+        if changed:
+            self.save_deployments(deps)
+            self.reload_go_proxy(deps)

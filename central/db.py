@@ -35,6 +35,7 @@ def init_db():
             id TEXT PRIMARY KEY,
             name TEXT,
             model TEXT,
+            served_model_name TEXT,
             deployment_type TEXT,
             is_embedding INTEGER,
             status TEXT,
@@ -42,6 +43,12 @@ def init_db():
             nodes_json TEXT
         )
     ''')
+    
+    # Simple migration for existing DB
+    try:
+        cursor.execute("ALTER TABLE deployments ADD COLUMN served_model_name TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
     
     # Configs Table
     cursor.execute('''

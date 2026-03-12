@@ -101,6 +101,7 @@ class WorkerManager:
         compose_content = template.render(
             node_name=node_name,
             model_name=req["model"],
+            served_model_name=req.get("served_model_name"),
             huggingface_token=token,
             task="embed" if req.get("is_embedding", False) else "generate",
             tensor_parallel_size=req["tp"],

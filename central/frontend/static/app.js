@@ -522,6 +522,7 @@ async function loadConfig(name) {
 
     document.getElementById('deployName').value = conf.name;
     document.getElementById('deployModel').value = conf.model;
+    document.getElementById('deployServedModel').value = conf.served_model_name || '';
 
     const dtype = conf.deployment_type || conf.mode || 'replicas';
     if (dtype === 'tp') {
@@ -581,6 +582,7 @@ function getFormData() {
         deployment_type: isTp ? "tp" : "replicas",
         is_embedding: document.getElementById('deployIsEmbedding').checked,
         model: document.getElementById('deployModel').value,
+        served_model_name: document.getElementById('deployServedModel').value.trim() || null,
         gpus: gpus,
         tp: isTp ? gpus.length : 1,
         max_len: parseInt(document.getElementById('deployMaxLen').value) || null,

@@ -23,6 +23,10 @@ services:
     command:
       - --model
       - "{{ model_name }}"
+{% if served_model_name %}
+      - --served-model-name
+      - "{{ served_model_name }}"
+{% endif %}
       - --ssl-keyfile
       - "/app/vllm.key"
       - --ssl-certfile
