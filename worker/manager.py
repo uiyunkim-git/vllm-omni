@@ -118,6 +118,9 @@ class WorkerManager:
         
         dep_dir = os.path.join(DATA_DIR, f"run_{replica_id}")
         
+        # Aggressively delete the container if it exists before deleting the folder
+        subprocess.run(["docker", "rm", "-f", node_name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
         # Aggressively delete the directory if it exists to clean up any fake 
         # empty directories created by Docker-in-Docker volume mount bugs
         if os.path.exists(dep_dir):

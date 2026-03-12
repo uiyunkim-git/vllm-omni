@@ -154,11 +154,16 @@ class CentralManager:
         rows = cursor.fetchall()
         deps = []
         for r in rows:
+            # Handle potential missing column for backwards compatibility
+            served_name = r["model"]
+            if "served_model_name" in r.keys() and r["served_model_name"]:
+                served_name = r["served_model_name"]
+                
             deps.append({
                 "id": r["id"],
                 "name": r["name"],
                 "model": r["model"],
-                "served_model_name": r.get("served_model_name") or r["model"],
+                "served_model_name": served_name,
                 "deployment_type": r["deployment_type"],
                 "is_embedding": bool(r["is_embedding"]),
                 "status": r["status"],
