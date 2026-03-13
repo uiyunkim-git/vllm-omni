@@ -22,7 +22,6 @@ app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 class DeployRequest(BaseModel):
     name: str
     deployment_type: str # "replicas" or "tp"
-    is_embedding: bool
     model: str
     served_model_name: Optional[str] = None
     gpus: List[str] # Global GPU IDs e.g., ["alpha-worker-1-0", "alpha-worker-1-1"]

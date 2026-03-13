@@ -26,7 +26,6 @@ class WorkerDeployRequest(BaseModel):
     deploy_id: str
     replica_id: str
     name: str
-    is_embedding: bool
     model: str
     gpus: List[int]
     tp: int = 1

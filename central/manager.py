@@ -117,7 +117,9 @@ class CentralManager:
         rows = cursor.fetchall()
         configs = []
         for r in rows:
-            configs.append(json.loads(r["config_json"]))
+            conf = json.loads(r["config_json"])
+            conf["name"] = r["name"]
+            configs.append(conf)
         conn.close()
         return configs
 
@@ -165,7 +167,6 @@ class CentralManager:
                 "model": r["model"],
                 "served_model_name": served_name,
                 "deployment_type": r["deployment_type"],
-                "is_embedding": bool(r["is_embedding"]),
                 "status": r["status"],
                 "gpus": json.loads(r["gpus_json"]) if r["gpus_json"] else [],
                 "nodes": json.loads(r["nodes_json"]) if r["nodes_json"] else []
@@ -179,9 +180,9 @@ class CentralManager:
         cursor.execute("DELETE FROM deployments")
         for d in deps:
             cursor.execute('''
-                INSERT INTO deployments (id, name, model, served_model_name, deployment_type, is_embedding, status, gpus_json, nodes_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d["deployment_type"], int(d["is_embedding"]), d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
+                INSERT INTO deployments (id, name, model, served_model_name, deployment_type, status, gpus_json, nodes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d["deployment_type"], d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
         conn.commit()
         conn.close()
 
@@ -211,7 +212,6 @@ class CentralManager:
             "id": deploy_id,
             "name": req["name"],
             "deployment_type": req["deployment_type"],
-            "is_embedding": req["is_embedding"],
             "model": req["model"],
             "served_model_name": req.get("served_model_name") or req["model"],
             "gpus": req["gpus"],
@@ -239,7 +239,6 @@ class CentralManager:
                             "deploy_id": deploy_id,
                             "replica_id": f"{deploy_id}_{wid}_{gid}", # Unique identifier for the worker to avoid collision
                             "name": req["name"],
-                            "is_embedding": req["is_embedding"],
                             "model": req["model"],
                             "served_model_name": req.get("served_model_name") or req["model"],
                             "gpus": [gid], # ONLY send one GPU
@@ -277,7 +276,6 @@ class CentralManager:
                     "deploy_id": deploy_id,
                     "replica_id": deploy_id, # Base ID
                     "name": req["name"],
-                    "is_embedding": req["is_embedding"],
                     "model": req["model"],
                     "served_model_name": req.get("served_model_name") or req["model"],
                     "gpus": gpus, # Send ALL selected GPUs

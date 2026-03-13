@@ -532,7 +532,7 @@ async function loadConfig(name) {
         document.getElementById('typeReplicas').checked = true;
     }
 
-    document.getElementById('deployIsEmbedding').checked = !!conf.is_embedding;
+
 
     document.getElementById('deployMaxLen').value = conf.max_len || '';
     document.getElementById('deployGpuUtil').value = conf.gpu_util || 0.9;
@@ -581,7 +581,7 @@ function getFormData() {
     return {
         name: name,
         deployment_type: isTp ? "tp" : "replicas",
-        is_embedding: document.getElementById('deployIsEmbedding').checked,
+
         model: document.getElementById('deployModel').value,
         served_model_name: document.getElementById('deployServedModel').value.trim() || null,
         gpus: gpus,
