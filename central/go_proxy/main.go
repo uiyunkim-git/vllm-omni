@@ -86,35 +86,7 @@ func loadConfig(path string) error {
 				jsonErr := fmt.Sprintf(`{"error":{"message":"Upstream vLLM node %s failed: %v","type":"upstream_error","param":null,"code":"502"}}`, targetURL.String(), e)
 				w.Write([]byte(jsonErr))
 			}
-			// Prevent duplicate CORS headers (we already set them in proxyHandler)
-			proxy.ModifyResponse = func(resp *http.Response) error {
-				resp.Header.Del("Access-Control-Allow-Origin")
-				resp.Header.Del("Access-Control-Allow-Methods")
-				resp.Header.Del("Access-Control-Allow-Headers")
-
-				// Deep Debugging: who is sending the 500 error?
-				if resp.StatusCode == 500 || resp.StatusCode == 502 {
-					log.Printf("🚨 BACKEND 500 FROM %s 🚨", resp.Request.URL.Host)
-					for k, v := range resp.Header {
-						log.Printf("Header: %s: %s", k, v)
-					}
-					// Dump a bit of the body
-					if resp.Body != nil {
-						bodyBytes, _ := io.ReadAll(resp.Body)
-						resp.Body.Close()
-
-						// We need a helper min function
-						dumpLen := len(bodyBytes)
-						if dumpLen > 100 {
-							dumpLen = 100
-						}
-						log.Printf("Body snippet: %s", string(bodyBytes[:dumpLen]))
-						// Restore body
-						resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-					}
-				}
-				return nil
-			}
+			// We don't need ModifyResponse logging anymore since the outer retryResponseWriter catches it
 			b.Proxy = proxy
 		}
 	}
@@ -204,9 +176,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var bestBackend *Backend
-	var minReqs int32 = -1
-
 	// Fallback alias resolution: "gpt-oss-120b" vs "openai/gpt-oss-120b"
 	backends, ok := currentConfig.Models[requestedModel]
 	if !ok || len(backends) == 0 {
@@ -225,32 +194,111 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routingMutex.Lock()
-	for _, b := range backends {
-		reqs := atomic.LoadInt32(&b.ActiveRequests)
-		if minReqs == -1 || reqs < minReqs {
-			minReqs = reqs
-			bestBackend = b
-		}
-	}
+	// 4. Retry loop (max 10 retries)
+	maxRetries := 10
+	var lastErrResponse *http.Response
+	var lastErrBody []byte
 
-	if bestBackend == nil {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var bestBackend *Backend
+		var minReqs int32 = -1
+
+		routingMutex.Lock()
+		for _, b := range backends {
+			reqs := atomic.LoadInt32(&b.ActiveRequests)
+			if minReqs == -1 || reqs < minReqs {
+				minReqs = reqs
+				bestBackend = b
+			}
+		}
+
+		if bestBackend == nil {
+			routingMutex.Unlock()
+			log.Printf("[Rejecting] No active backends for %s", requestedModel)
+			http.Error(w, `{"error":{"message":"No available backends"}}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		atomic.AddInt32(&bestBackend.ActiveRequests, 1)
 		routingMutex.Unlock()
-		log.Printf("[Rejecting] No active backends for %s", requestedModel)
-		http.Error(w, `{"error":{"message":"No available backends"}}`, http.StatusServiceUnavailable)
+
+		log.Printf("[Routing] %s -> %s (Active: %d, Attempt: %d)", requestedModel, bestBackend.URL.String(), minReqs, attempt+1)
+
+		// Create a custom response writer to catch 500s internally
+		rec := &retryResponseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK, // default
+			body:           &bytes.Buffer{},
+			header:         make(http.Header),
+		}
+
+		// Reset request body for the proxy if we already consumed it
+		if r.Method == http.MethodPost && bodyBytes != nil {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		bestBackend.Proxy.ServeHTTP(rec, r)
+		
+		atomic.AddInt32(&bestBackend.ActiveRequests, -1)
+		log.Printf("[Completed] Route %s -> %s (Status: %d)", requestedModel, bestBackend.URL.String(), rec.statusCode)
+
+		// Check if we need to retry
+		if rec.statusCode >= 500 {
+			lastErrResponse = &http.Response{
+				StatusCode: rec.statusCode,
+				Header:     rec.header,
+			}
+			lastErrBody = rec.body.Bytes()
+			
+			log.Printf("🚨 BACKEND %d FROM %s (Attempt %d) 🚨", rec.statusCode, bestBackend.URL.Host, attempt+1)
+			
+			// If we have more retries, continue the loop
+			if attempt < maxRetries {
+				continue
+			}
+		}
+
+		// Success or non-500 error, or we ran out of retries.
+		// Write the recorded response to the actual client.
+		for k, v := range rec.header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.statusCode)
+		w.Write(rec.body.Bytes())
 		return
 	}
 
-	// 4. Forward
-	atomic.AddInt32(&bestBackend.ActiveRequests, 1)
-	routingMutex.Unlock()
-	
-	defer atomic.AddInt32(&bestBackend.ActiveRequests, -1)
+	// This should technically never be reached due to the return inside the loop,
+	// but just in case we fall through, write the last error.
+	if lastErrResponse != nil {
+		for k, v := range lastErrResponse.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(lastErrResponse.StatusCode)
+		w.Write(lastErrBody)
+	} else {
+		http.Error(w, `{"error":{"message":"Max retries exceeded without a response"}}`, http.StatusBadGateway)
+	}
+}
 
-	log.Printf("[Routing] %s -> %s (Active: %d)", requestedModel, bestBackend.URL.String(), minReqs)
+// Custom ResponseWriter to intercept status code and body
+type retryResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	body       *bytes.Buffer
+	header     http.Header
+}
 
-	bestBackend.Proxy.ServeHTTP(w, r)
-	log.Printf("[Completed] Route %s -> %s", requestedModel, bestBackend.URL.String())
+func (w *retryResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *retryResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func (w *retryResponseWriter) Write(b []byte) (int, error) {
+	return w.body.Write(b)
 }
 
 func main() {

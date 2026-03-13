@@ -171,7 +171,7 @@ function renderDeployments() {
     list.innerHTML = '';
 
     if (deployments.length === 0) {
-        list.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No active deployments.</td></tr>';
+        list.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">No active deployments.</td></tr>';
         return;
     }
 
@@ -185,6 +185,7 @@ function renderDeployments() {
                 <td class="font-monospace">${dep.id}</td>
                 <td class="fw-bold">${dep.name}</td>
                 <td><span class="text-muted small">${dep.model}</span></td>
+                <td><span class="text-muted small">${dep.served_model_name || '-'}</span></td>
                 <td><span class="badge bg-secondary">${(dep.deployment_type || '').toUpperCase()}</span></td>
                 <td>${statusBadge}</td>
                 <td><small>${dep.gpus.join(', ')}</small></td>

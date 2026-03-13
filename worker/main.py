@@ -62,8 +62,10 @@ async def deploy_model(req: WorkerDeployRequest):
         dep = manager.deploy_model(req.dict())
         return dep
     except Exception as e:
-        logger.error(f"Deploy failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        err_str = f"Deploy failed: {e}\n{traceback.format_exc()}"
+        logger.error(err_str)
+        raise HTTPException(status_code=500, detail=err_str)
 
 @app.post("/api/internal/stop/{deploy_id}")
 async def stop_deployment(deploy_id: str):
