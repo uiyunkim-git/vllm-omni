@@ -37,7 +37,6 @@ def init_db():
             model TEXT,
             served_model_name TEXT,
             deployment_type TEXT,
-            is_embedding INTEGER,
             status TEXT,
             gpus_json TEXT,
             nodes_json TEXT
