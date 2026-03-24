@@ -164,6 +164,7 @@ class CentralManager:
                 "name": r["name"],
                 "model": r["model"],
                 "served_model_name": served_name,
+                "engine": r["engine"] if "engine" in r.keys() else "vllm",
                 "deployment_type": r["deployment_type"],
                 "is_embedding": bool(r["is_embedding"]),
                 "status": r["status"],
@@ -179,9 +180,9 @@ class CentralManager:
         cursor.execute("DELETE FROM deployments")
         for d in deps:
             cursor.execute('''
-                INSERT INTO deployments (id, name, model, served_model_name, deployment_type, is_embedding, status, gpus_json, nodes_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d["deployment_type"], int(d["is_embedding"]), d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
+                INSERT INTO deployments (id, name, model, served_model_name, engine, deployment_type, is_embedding, status, gpus_json, nodes_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d.get("engine", "vllm"), d["deployment_type"], int(d["is_embedding"]), d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
         conn.commit()
         conn.close()
 
@@ -214,6 +215,7 @@ class CentralManager:
             "is_embedding": req["is_embedding"],
             "model": req["model"],
             "served_model_name": req.get("served_model_name") or req["model"],
+            "engine": req.get("engine", "vllm"),
             "gpus": req["gpus"],
             "tp": req["tp"],
             "status": "starting",
@@ -242,6 +244,7 @@ class CentralManager:
                             "is_embedding": req["is_embedding"],
                             "model": req["model"],
                             "served_model_name": req.get("served_model_name") or req["model"],
+                            "engine": req.get("engine", "vllm"),
                             "gpus": [gid], # ONLY send one GPU
                             "tp": 1,
                             "max_len": req.get("max_len"),
@@ -280,6 +283,7 @@ class CentralManager:
                     "is_embedding": req["is_embedding"],
                     "model": req["model"],
                     "served_model_name": req.get("served_model_name") or req["model"],
+                    "engine": req.get("engine", "vllm"),
                     "gpus": gpus, # Send ALL selected GPUs
                     "tp": len(gpus), # Explicitly set TP to GPU count
                     "max_len": req.get("max_len"),
@@ -453,7 +457,8 @@ class CentralManager:
                     host = node["host"]
                     # Calculate the API port. Usually port + 40000
                     api_port = node["port"] + 40000
-                    health_url = f"https://{host}:{api_port}/health"
+                    health_path = "/health" if dep.get("engine", "vllm") == "vllm" else "/"
+                    health_url = f"https://{host}:{api_port}{health_path}"
 
                     try:
                         resp = await client.get(health_url, timeout=2.0)

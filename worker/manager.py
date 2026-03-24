@@ -87,8 +87,13 @@ class WorkerManager:
         used_ports.add(current_port)
         ports.append(current_port)
         
-        template = self.env.get_template("vllm_node.j2")
-        node_name = f"vllm_{replica_id}"
+        engine = req.get("engine", "vllm")
+        if engine == "ollama":
+            template = self.env.get_template("ollama_node.j2")
+            node_name = f"ollama_{replica_id}"
+        else:
+            template = self.env.get_template("vllm_node.j2")
+            node_name = f"vllm_{replica_id}"
         
         token = os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
         if not token:
@@ -111,6 +116,7 @@ class WorkerManager:
             gpu_memory_util=req.get("gpu_util"),
             replica_id=replica_id,
             host_cache_dir="/home/uiyunkim/.cache/huggingface",
+            host_data_dir="/home/uiyunkim/.ollama",
             host_cert_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.crt"),
             host_key_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.key"),
             extra_args=shlex.split(req.get("extra_args") or "")

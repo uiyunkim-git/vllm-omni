@@ -25,6 +25,7 @@ class DeployRequest(BaseModel):
     is_embedding: bool
     model: str
     served_model_name: Optional[str] = None
+    engine: Optional[str] = "vllm"
     gpus: List[str] # Global GPU IDs e.g., ["alpha-worker-1-0", "alpha-worker-1-1"]
     tp: int = 1
     max_len: Optional[int] = None

@@ -49,6 +49,11 @@ def init_db():
         cursor.execute("ALTER TABLE deployments ADD COLUMN served_model_name TEXT")
     except sqlite3.OperationalError:
         pass # Column already exists
+
+    try:
+        cursor.execute("ALTER TABLE deployments ADD COLUMN engine TEXT DEFAULT 'vllm'")
+    except sqlite3.OperationalError:
+        pass # Column already exists
     
     # Configs Table
     cursor.execute('''

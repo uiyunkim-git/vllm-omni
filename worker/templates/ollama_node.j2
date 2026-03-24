@@ -1,0 +1,59 @@
+version: '3.9'
+
+services:
+  {{ node_name }}:
+    image: ollama/ollama:latest
+    container_name: {{ node_name }}
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    expose:
+      - "11434"
+    volumes:
+      - "{{ host_data_dir }}:/root/.ollama"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: {{ gpu_ids | tojson }}
+    networks:
+      - vllm_network
+
+  {{ node_name }}_proxy:
+    image: nginx:alpine
+    container_name: {{ node_name }}_proxy
+    restart: unless-stopped
+    ports:
+      - "{{ port + 40000 }}:443"
+    volumes:
+      - "{{ host_cert_path }}:/etc/nginx/ssl/vllm.crt:ro"
+      - "{{ host_key_path }}:/etc/nginx/ssl/vllm.key:ro"
+    command: |
+      sh -c "
+      cat << 'EOF' > /etc/nginx/conf.d/default.conf
+      server {
+          listen 443 ssl;
+          ssl_certificate /etc/nginx/ssl/vllm.crt;
+          ssl_certificate_key /etc/nginx/ssl/vllm.key;
+          location / {
+              proxy_pass http://{{ node_name }}:11434;
+              proxy_set_header Host \$$host;
+              proxy_set_header X-Real-IP \$$remote_addr;
+              proxy_buffering off;
+              proxy_read_timeout 300s;
+          }
+      }
+      EOF
+      nginx -g 'daemon off;'
+      "
+    depends_on:
+      - {{ node_name }}
+    networks:
+      - vllm_network
+
+networks:
+  vllm_network:
+    external: true
+    name: vllm_default

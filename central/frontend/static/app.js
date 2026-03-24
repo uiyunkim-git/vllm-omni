@@ -185,6 +185,7 @@ function renderDeployments() {
                 <td class="font-monospace">${dep.id}</td>
                 <td class="fw-bold">${dep.name}</td>
                 <td><span class="text-muted small">${dep.model}</span></td>
+                <td><span class="badge bg-dark">${(dep.engine || 'vllm').toUpperCase()}</span></td>
                 <td><span class="text-muted small">${dep.served_model_name || '-'}</span></td>
                 <td><span class="badge bg-secondary">${(dep.deployment_type || '').toUpperCase()}</span></td>
                 <td>${statusBadge}</td>
@@ -524,6 +525,12 @@ async function loadConfig(name) {
     document.getElementById('deployName').value = conf.name;
     document.getElementById('deployModel').value = conf.model;
     document.getElementById('deployServedModel').value = conf.served_model_name || '';
+    
+    // Set Engine explicitly, defaulting to vllm if missing for backwards compatibility
+    const engineEl = document.getElementById('deployEngine');
+    if (engineEl) {
+        engineEl.value = conf.engine || 'vllm';
+    }
 
     const dtype = conf.deployment_type || conf.mode || 'replicas';
     if (dtype === 'tp') {
@@ -584,6 +591,7 @@ function getFormData() {
         is_embedding: document.getElementById('deployIsEmbedding').checked,
         model: document.getElementById('deployModel').value,
         served_model_name: document.getElementById('deployServedModel').value.trim() || null,
+        engine: document.getElementById('deployEngine') ? document.getElementById('deployEngine').value : 'vllm',
         gpus: gpus,
         tp: isTp ? gpus.length : 1,
         max_len: parseInt(document.getElementById('deployMaxLen').value) || null,

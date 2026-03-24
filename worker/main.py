@@ -28,6 +28,7 @@ class WorkerDeployRequest(BaseModel):
     name: str
     is_embedding: bool
     model: str
+    engine: Optional[str] = "vllm"
     gpus: List[int]
     tp: int = 1
     max_len: Optional[int] = None

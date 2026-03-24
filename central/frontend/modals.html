@@ -24,7 +24,7 @@
                     </div>
                     <div class="row mb-3">
                         <div class="col-md-6">
-                            <label class="form-label">HF Model ID</label>
+                            <label class="form-label">HF Model ID / Ollama Model Name</label>
                             <input type="text" class="form-control" id="deployModel" required
                                 placeholder="meta-llama/Meta-Llama-3-8B-Instruct">
                             <div class="mt-2">
@@ -32,6 +32,13 @@
                                 <input type="text" class="form-control form-control-sm" id="deployServedModel" 
                                     placeholder="e.g. gpt-oss-120b-A">
                                 <div class="form-text" style="font-size: 0.75rem;">Overrides model name in API routing.</div>
+                            </div>
+                            <div class="mt-2">
+                                <label class="form-label">Engine</label>
+                                <select class="form-select form-select-sm" id="deployEngine">
+                                    <option value="vllm" selected>vLLM</option>
+                                    <option value="ollama">Ollama</option>
+                                </select>
                             </div>
                         </div>
                         <div class="col-md-6">
