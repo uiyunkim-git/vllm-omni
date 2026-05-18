@@ -209,12 +209,14 @@ class CentralManager:
             if total_gpus not in [1, 2, 4, 8]:
                 raise Exception("Tensor Parallelism requires exactly 1, 2, 4, or 8 GPUs.")
 
+
         dep = {
             "id": deploy_id,
             "name": req["name"],
             "deployment_type": req["deployment_type"],
             "model": req["model"],
             "served_model_name": req.get("served_model_name") or req["model"],
+            "is_embedding": False,
             "engine": req.get("engine", "vllm"),
             "gpus": req["gpus"],
             "tp": req["tp"],
@@ -243,6 +245,7 @@ class CentralManager:
                             "name": req["name"],
                             "model": req["model"],
                             "served_model_name": req.get("served_model_name") or req["model"],
+                            "is_embedding": False,
                             "engine": req.get("engine", "vllm"),
                             "gpus": [gid], # ONLY send one GPU
                             "tp": 1,
@@ -251,7 +254,7 @@ class CentralManager:
                             "extra_args": req.get("extra_args")
                         }
                         
-                        resp = await client.post(worker_url, json=worker_req, timeout=60.0)
+                        resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                         if resp.status_code != 200:
                             raise Exception(f"Failed to deploy replica on worker {wid} GPU {gid}: {resp.text}")
                         
@@ -281,6 +284,7 @@ class CentralManager:
                     "name": req["name"],
                     "model": req["model"],
                     "served_model_name": req.get("served_model_name") or req["model"],
+                    "is_embedding": False,
                     "engine": req.get("engine", "vllm"),
                     "gpus": gpus, # Send ALL selected GPUs
                     "tp": len(gpus), # Explicitly set TP to GPU count
@@ -289,7 +293,7 @@ class CentralManager:
                     "extra_args": req.get("extra_args")
                 }
                 
-                resp = await client.post(worker_url, json=worker_req, timeout=60.0)
+                resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                 if resp.status_code != 200:
                     raise Exception(f"Failed to deploy TP model on worker {wid}: {resp.text}")
                 

@@ -3,11 +3,29 @@ let gpus = [];
 let deployments = [];
 let savedConfigs = [];
 let endpoints = {};
+let proxyStats = {};
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchStatus();
     setInterval(fetchStatus, 5000);
+    fetchProxyStats();
+    setInterval(fetchProxyStats, 2000);
+
+    if (new URLSearchParams(window.location.search).get('deployed') === '1') {
+        history.replaceState({}, '', '/');
+        setTimeout(() => showAlert('success', '배포가 성공적으로 시작되었습니다.'), 300);
+    }
 });
+
+async function fetchProxyStats() {
+    try {
+        const res = await fetch('/api/proxy_stats');
+        proxyStats = await res.json();
+        if (document.getElementById('model-stats-container')) renderModelStats();
+    } catch (err) {
+        // proxy may not be up yet, ignore
+    }
+}
 
 async function fetchStatus() {
     try {
@@ -64,22 +82,27 @@ function renderGPUs() {
 
     gpus.forEach(gpu => {
         let memPercent = Math.min(100, Math.round((gpu.memory_used / gpu.memory_total) * 100));
+        const barColor = memPercent > 85 ? '#ef4444' : memPercent > 60 ? '#f59e0b' : '#3b82f6';
         // Global GPU Card
         if (list) {
             list.innerHTML += `
-                <div class="col-md-4 mb-3">
-                    <div class="card shadow-sm h-100">
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <h5 class="card-title mb-0">GPU ${gpu.local_id} <span class="badge bg-secondary">${gpu.worker_name}</span></h5>
-                                <small class="text-muted font-monospace">${gpu.name}</small>
+                <div class="col-md-4 col-lg-3 mb-3">
+                    <div class="card h-100">
+                        <div class="card-body py-3 px-3">
+                            <div class="d-flex justify-content-between align-items-start mb-1">
+                                <div>
+                                    <span class="fw-semibold small">GPU ${gpu.local_id}</span>
+                                    <span class="badge bg-secondary ms-1" style="font-size:.8rem">${gpu.worker_name}</span>
+                                </div>
+                                <span class="fw-bold small" style="color:${barColor}">${memPercent}%</span>
                             </div>
-                            <div class="progress mb-2" style="height: 10px;">
-                                <div class="progress-bar ${memPercent > 80 ? 'bg-danger' : 'bg-primary'}" role="progressbar" style="width: ${memPercent}%"></div>
+                            <div class="text-muted mb-2" style="font-size:.82rem">${gpu.name}</div>
+                            <div class="progress" style="height:5px;border-radius:3px;background:#e5e7eb">
+                                <div style="width:${memPercent}%;background:${barColor};height:100%;border-radius:3px;transition:width .4s"></div>
                             </div>
-                            <div class="d-flex justify-content-between text-muted small">
-                                <span>${memPercent}% VRAM</span>
-                                <span>${(gpu.memory_used / 1024).toFixed(1)}GB / ${(gpu.memory_total / 1024).toFixed(1)}GB</span>
+                            <div class="d-flex justify-content-between mt-1" style="font-size:.82rem;color:#9ca3af">
+                                <span>${(gpu.memory_used / 1024).toFixed(1)} GB used</span>
+                                <span>${(gpu.memory_total / 1024).toFixed(0)} GB total</span>
                             </div>
                         </div>
                     </div>
@@ -87,14 +110,29 @@ function renderGPUs() {
             `;
         }
 
-        // Deploy Modal Checkboxes
+        // Deploy Page GPU Checkboxes
         if (gpuGrid) {
             const isChecked = selectedGpuIds.has(gpu.id) ? 'checked' : '';
+            const barColor = memPercent > 85 ? '#ef4444' : memPercent > 60 ? '#f59e0b' : '#3b82f6';
+
+            // Find running deployments on this GPU
+            const runningOnGpu = deployments.filter(d =>
+                d.status === 'running' && d.gpus && d.gpus.includes(gpu.id)
+            );
+            const runningHtml = runningOnGpu.length > 0
+                ? runningOnGpu.map(d => `<div style="font-size:.72rem;color:#dc2626;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px" title="${d.name}: ${d.served_model_name || d.model}">▶ ${d.name}</div>`).join('')
+                : '';
+
             gpuGrid.innerHTML += `
                 <input type="checkbox" class="btn-check gpu-checkbox" id="gpu-btn-${gpu.id}" value="${gpu.id}" data-node="${gpu.worker_id}" autocomplete="off" onchange="validateDeployGpus()" ${isChecked}>
-                <label class="btn btn-outline-info text-start p-2" for="gpu-btn-${gpu.id}" style="width: 200px;">
-                    <div class="fw-bold text-truncate" title="GPU ${gpu.local_id}">GPU ${gpu.local_id} <span class="badge bg-secondary ms-1">${gpu.worker_name}</span></div>
-                    <div class="small mt-1">${memPercent}% Used</div>
+                <label for="gpu-btn-${gpu.id}" class="gpu-checkbox-label">
+                    <div style="font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">GPU ${gpu.local_id}</div>
+                    <div style="font-size:.78rem;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${gpu.worker_name}</div>
+                    <div style="height:3px;border-radius:2px;background:#e5e7eb;margin:4px 0 2px">
+                        <div style="width:${memPercent}%;height:100%;border-radius:2px;background:${barColor}"></div>
+                    </div>
+                    <div style="font-size:.78rem;color:#9ca3af">${memPercent}%</div>
+                    ${runningHtml}
                 </label>
             `;
         }
@@ -111,16 +149,25 @@ window.toggleDeployModeUI = function () {
     const tpContainer = document.getElementById('tpDisplayContainer');
     const checkboxes = document.querySelectorAll('.gpu-checkbox');
 
+    // Highlight selected serving type card
+    const labelReplicas = document.getElementById('label-replicas');
+    const labelTp = document.getElementById('label-tp');
+    if (labelReplicas && labelTp) {
+        labelReplicas.style.borderColor = isTp ? '#e5e7eb' : '#3b82f6';
+        labelReplicas.style.background  = isTp ? '' : '#eff6ff';
+        labelTp.style.borderColor       = isTp ? '#3b82f6' : '#e5e7eb';
+        labelTp.style.background        = isTp ? '#eff6ff' : '';
+    }
+
     if (isTp) {
         nodeSelector.style.display = 'block';
         tpContainer.style.display = 'block';
-        helpText.textContent = "Select 1, 2, 4, or 8 GPUs. Tensor Parallelism is automatically calculated.";
+        helpText.textContent = "1, 2, 4, 8개 GPU를 선택하세요. TP 수가 자동으로 계산됩니다.";
         filterGpusByNode();
     } else {
         nodeSelector.style.display = 'none';
         tpContainer.style.display = 'none';
-        helpText.textContent = "Select multiple GPUs. Each selected GPU will run a separate 1-GPU replica.";
-        // Show all GPUs
+        helpText.textContent = "GPU를 선택하세요. 각 GPU에 독립적인 레플리카가 실행됩니다.";
         checkboxes.forEach(cb => cb.nextElementSibling.style.display = 'inline-block');
     }
     validateDeployGpus();
@@ -165,6 +212,49 @@ window.validateDeployGpus = function () {
     }
 }
 
+function renderModelStats() {
+    const container = document.getElementById('model-stats-container');
+    if (!container) return;
+
+    const models = Object.keys(proxyStats);
+    if (models.length === 0) {
+        container.innerHTML = '<div class="col-12 text-muted small">No inference data yet.</div>';
+        return;
+    }
+
+    const rows = models.map(name => {
+        const s = proxyStats[name];
+        const active = s.active_requests || 0;
+        const rps = (s.req_per_sec || 0).toFixed(1);
+        const activeBadge = active > 0
+            ? `<span class="badge stat-active">${active} 진행 중</span>`
+            : `<span class="badge stat-idle">대기</span>`;
+        const rpsBadge = `<span class="badge stat-rps">${rps} req/s</span>`;
+        return `
+            <tr>
+                <td class="font-monospace fw-semibold small text-truncate" style="max-width:260px" title="${name}">${name}</td>
+                <td class="text-center">${activeBadge}</td>
+                <td class="text-center">${rpsBadge}</td>
+            </tr>`;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="col-12">
+            <div class="card table-card">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th class="small text-muted fw-semibold">모델 (Served Name)</th>
+                            <th class="small text-muted fw-semibold text-center">추론 진행</th>
+                            <th class="small text-muted fw-semibold text-center">처리량</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
+}
+
 function renderDeployments() {
     const list = document.getElementById('deployments-table-body');
     if (!list) return;
@@ -176,29 +266,36 @@ function renderDeployments() {
     }
 
     deployments.forEach(dep => {
-        let statusBadge = dep.status === 'running'
-            ? '<span class="badge bg-success"><i class="fa-solid fa-play me-1"></i>Running</span>'
-            : '<span class="badge bg-warning text-dark"><i class="fa-solid fa-spinner fa-spin me-1"></i>Starting</span>';
+        const isRunning = dep.status === 'running';
+        const statusDot = isRunning
+            ? `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#22c55e;display:inline-block"></span><span class="small">Running</span></span>`
+            : `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block"></span><span class="small text-muted">Starting</span></span>`;
+        const dtype = (dep.deployment_type || '').toUpperCase();
+        const engine = (dep.engine || 'vllm').toUpperCase();
+        const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
+        const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark' : 'bg-dark';
+        const gpuList = dep.gpus.map(g => `<span class="badge bg-light text-secondary border me-1" style="font-size:.8rem">${g}</span>`).join('');
 
         list.innerHTML += `
             <tr>
-                <td class="font-monospace">${dep.id}</td>
-                <td class="fw-bold">${dep.name}</td>
-                <td><span class="text-muted small">${dep.model}</span></td>
-                <td><span class="badge bg-dark">${(dep.engine || 'vllm').toUpperCase()}</span></td>
-                <td><span class="text-muted small">${dep.served_model_name || '-'}</span></td>
-                <td><span class="badge bg-secondary">${(dep.deployment_type || '').toUpperCase()}</span></td>
-                <td>${statusBadge}</td>
-                <td><small>${dep.gpus.join(', ')}</small></td>
                 <td>
-                    <div class="btn-group">
-                        <button onclick="viewLogs('${dep.id}')" class="btn btn-sm btn-outline-secondary" title="View Logs">
-                            <i class="fa-solid fa-terminal"></i>
-                        </button>
-                        <button id="stop-btn-${dep.id}" onclick="stopDeployment('${dep.id}')" class="btn btn-sm btn-outline-danger" title="Stop">
-                            <i class="fa-solid fa-stop"></i>
-                        </button>
-                    </div>
+                    <div class="fw-semibold small">${dep.name}</div>
+                    <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${dep.id}</div>
+                </td>
+                <td>
+                    <div class="small text-truncate" style="max-width:200px" title="${dep.model}">${dep.model}</div>
+                    ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="font-monospace text-muted text-truncate" style="font-size:.8rem;max-width:200px" title="${dep.served_model_name}">→ ${dep.served_model_name}</div>` : ''}
+                </td>
+                <td class="text-nowrap">
+                    <span class="badge ${engineColor} me-1">${engine}</span>
+                    <span class="badge ${dtypeColor}">${dtype}</span>
+                </td>
+                <td>${statusDot}</td>
+                <td><div class="d-flex flex-wrap gap-1">${gpuList}</div></td>
+                <td class="text-end text-nowrap">
+                    <button onclick="viewLogs('${dep.id}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
+                    <button id="stop-btn-${dep.id}" onclick="stopDeployment('${dep.id}')" class="btn btn-sm btn-outline-danger" title="Stop"><i class="fa-solid fa-stop"></i></button>
+                </td>
                 </td>
             </tr>
         `;
@@ -350,29 +447,44 @@ function renderConfigs() {
         return;
     }
 
-    savedConfigs.forEach(conf => {
-        list.innerHTML += `
-            <div class="col-md-4 mb-3">
-                <div class="card shadow-sm h-100">
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h5 class="card-title mb-0">${conf.name}</h5>
-                            <span class="badge bg-info text-dark">${(conf.deployment_type || conf.mode || 'REPLICAS').toUpperCase()}</span>
-                        </div>
-                        <p class="card-text small text-muted text-truncate" title="${conf.model}">${conf.model}</p>
-                    </div>
-                    </div>
-                    <div class="card-footer bg-transparent border-top-0 d-flex justify-content-between text-end">
-                        <button class="btn btn-sm btn-outline-danger" onclick="deleteConfig('${conf.name}')" title="Delete Config"><i class="fa-solid fa-trash"></i></button>
-                        <div>
-                            <button class="btn btn-sm btn-outline-primary me-2" onclick="loadConfig('${conf.name}')"><i class="fa-solid fa-edit me-1"></i>Edit</button>
-                            <button class="btn btn-sm btn-primary" onclick="loadConfig('${conf.name}')"><i class="fa-solid fa-play me-1"></i>Run</button>
-                        </div>
-                    </div>
-                </div>
+    const rows = savedConfigs.map(conf => {
+        const dtype = (conf.deployment_type || conf.mode || 'replicas').toUpperCase();
+        const engine = (conf.engine || 'vllm').toUpperCase();
+        const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
+        const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark' : 'bg-dark';
+        return `
+            <tr class="config-row">
+                <td>
+                    <div class="fw-semibold small">${conf.name}</div>
+                    <div class="font-monospace text-muted text-truncate" style="font-size:.82rem;max-width:320px" title="${conf.model}">${conf.model}</div>
+                </td>
+                <td class="text-nowrap">
+                    <span class="badge ${dtypeColor} me-1">${dtype}</span>
+                    <span class="badge ${engineColor}">${engine}</span>
+                </td>
+                <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-danger me-1" onclick="deleteConfig('${conf.name}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary me-1" onclick="loadConfig('${conf.name}')"><i class="fa-solid fa-pen me-1"></i>Edit</button>
+                    <button class="btn btn-sm btn-primary" onclick="loadConfig('${conf.name}')"><i class="fa-solid fa-play me-1"></i>Run</button>
+                </td>
+            </tr>`;
+    }).join('');
+
+    list.innerHTML = `
+        <div class="col-12">
+            <div class="card table-card">
+                <table class="table table-hover">
+                    <thead class="table-light">
+                        <tr>
+                            <th class="small text-muted fw-semibold">이름 / 모델</th>
+                            <th class="small text-muted fw-semibold">모드</th>
+                            <th class="small text-muted fw-semibold text-end">액션</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
             </div>
-        `;
-    });
+        </div>`;
 
     // Populate modal dropdown
     const selector = document.getElementById('configSelector');
@@ -423,20 +535,28 @@ function renderEndpoints() {
     pendingList.innerHTML = '';
     activeList.innerHTML = '';
 
+    const activeRows = [];
+
     Object.values(endpoints).forEach(ep => {
         if (ep.status === 'pending') {
             hasPending = true;
             pendingList.innerHTML += `
-                <div class="col-md-6 mb-3">
-                    <div class="card border-warning shadow-sm">
+                <div class="col-md-6 col-lg-4">
+                    <div class="card" style="border-left:3px solid #f59e0b">
                         <div class="card-body">
-                            <h5 class="card-title text-warning"><i class="fa-solid fa-triangle-exclamation me-2"></i>New Node Detected</h5>
-                            <p class="mb-1 text-muted small">ID: <span class="font-monospace">${ep.id}</span></p>
-                            <p class="mb-3 text-muted small">Host: <span class="font-monospace">${ep.host}:${ep.port}</span> (${ep.gpus.length} GPUs)</p>
-
-                            <div class="input-group input-group-sm">
-                                <input type="text" id="accept-name-${ep.id}" class="form-control" placeholder="Assign Name (e.g. server-room-1)" value="${inputCache[`accept-name-${ep.id}`] || ep.id}">
-                                <button class="btn btn-success" onclick="acceptEndpoint('${ep.id}')">Accept</button>
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <div>
+                                    <div class="fw-semibold">신규 노드 감지됨</div>
+                                    <div class="text-muted small">${ep.gpus.length}개 GPU · ${ep.host}:${ep.port}</div>
+                                </div>
+                                <span class="badge bg-warning text-dark">Pending</span>
+                            </div>
+                            <div class="text-muted mb-3 font-monospace small">${ep.id}</div>
+                            <div class="input-group">
+                                <input type="text" id="accept-name-${ep.id}" class="form-control" placeholder="노드 이름 지정" value="${inputCache[`accept-name-${ep.id}`] || ep.id}">
+                                <button class="btn btn-success" onclick="acceptEndpoint('${ep.id}')">
+                                    <i class="fa-solid fa-check me-1"></i>Accept
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -444,29 +564,52 @@ function renderEndpoints() {
             `;
         } else if (ep.status === 'active') {
             hasActive = true;
-            activeList.innerHTML += `
-                <div class="col-md-4 mb-3">
-                    <div class="card border-success shadow-sm">
-                        <div class="card-body bg-light">
-                            <div class="d-flex justify-content-between">
-                                <h5 class="card-title text-success"><i class="fa-solid fa-circle-check me-2"></i>${ep.name}</h5>
-                                <span class="badge bg-secondary">${ep.gpus.length} GPUs</span>
-                            </div>
-                            <p class="mb-0 text-muted small mt-2">Host: <span class="font-monospace">${ep.host}:${ep.port}</span></p>
-                            <p class="mb-0 text-muted small">ID: <span class="font-monospace">${ep.id}</span></p>
-                        </div>
-                        <div class="card-footer bg-transparent border-top-0 d-flex justify-content-end gap-2 text-end">
-                            <button class="btn btn-sm btn-outline-info" onclick="renameEndpoint('${ep.id}', '${ep.name}')"><i class="fa-solid fa-i-cursor me-1"></i>Rename</button>
-                            <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${ep.id}')"><i class="fa-solid fa-trash me-1"></i>Remove</button>
-                        </div>
-                    </div>
-                </div>
-            `;
+            activeRows.push(`
+                <tr>
+                    <td>
+                        <span class="d-inline-flex align-items-center gap-2">
+                            <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;display:inline-block"></span>
+                            <span class="fw-semibold">${ep.name}</span>
+                        </span>
+                    </td>
+                    <td class="font-monospace text-muted">${ep.host}:${ep.port}</td>
+                    <td><span class="badge bg-secondary">${ep.gpus.length} GPUs</span></td>
+                    <td class="font-monospace text-muted small">${ep.id}</td>
+                    <td class="text-end text-nowrap">
+                        <button class="btn btn-sm btn-outline-secondary me-1" onclick="renameEndpoint('${ep.id}', '${ep.name}')">
+                            <i class="fa-solid fa-pen me-1"></i>이름 변경
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${ep.id}')">
+                            <i class="fa-solid fa-trash me-1"></i>제거
+                        </button>
+                    </td>
+                </tr>
+            `);
         }
     });
 
-    if (!hasPending) pendingList.innerHTML = '<div class="col-12 text-muted small">No pending nodes.</div>';
-    if (!hasActive) activeList.innerHTML = '<div class="col-12 text-muted small">No active nodes.</div>';
+    if (!hasPending) {
+        pendingList.innerHTML = '<div class="col-12 text-muted">등록 대기 중인 노드가 없습니다.</div>';
+    }
+
+    if (!hasActive) {
+        activeList.innerHTML = '<p class="text-muted p-3 mb-0">활성화된 엔드포인트가 없습니다.</p>';
+    } else {
+        activeList.innerHTML = `
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th class="text-muted fw-semibold small">노드 이름</th>
+                        <th class="text-muted fw-semibold small">호스트</th>
+                        <th class="text-muted fw-semibold small">GPU</th>
+                        <th class="text-muted fw-semibold small">ID</th>
+                        <th class="text-muted fw-semibold small text-end">액션</th>
+                    </tr>
+                </thead>
+                <tbody>${activeRows.join('')}</tbody>
+            </table>
+        `;
+    }
 
     // Restore focus and cursor position if the user was typing
     if (activeId) {
@@ -519,18 +662,21 @@ function resetDeployModal() {
 }
 
 async function loadConfig(name) {
+    // If not on the deploy page, navigate there with config param
+    if (window.location.pathname !== '/deploy') {
+        window.location.href = `/deploy?config=${encodeURIComponent(name)}`;
+        return;
+    }
+
     const conf = savedConfigs.find(c => c.name === name);
     if (!conf) return;
 
     document.getElementById('deployName').value = conf.name;
     document.getElementById('deployModel').value = conf.model;
     document.getElementById('deployServedModel').value = conf.served_model_name || '';
-    
-    // Set Engine explicitly, defaulting to vllm if missing for backwards compatibility
+
     const engineEl = document.getElementById('deployEngine');
-    if (engineEl) {
-        engineEl.value = conf.engine || 'vllm';
-    }
+    if (engineEl) engineEl.value = conf.engine || 'vllm';
 
     const dtype = conf.deployment_type || conf.mode || 'replicas';
     if (dtype === 'tp') {
@@ -539,33 +685,20 @@ async function loadConfig(name) {
         document.getElementById('typeReplicas').checked = true;
     }
 
-
-
     document.getElementById('deployMaxLen').value = conf.max_len || '';
     document.getElementById('deployGpuUtil').value = conf.gpu_util || 0.9;
     document.getElementById('deployExtraArgs').value = conf.extra_args || '';
 
-    // Make sure GPUs are loaded
-    if (gpus.length === 0) {
-        await fetchStatus();
-    }
+    if (gpus.length === 0) await fetchStatus();
 
-    // Select GPUs in grid
     const checkboxes = document.querySelectorAll('.gpu-checkbox');
     const gpusToSelect = conf.gpus || conf.gpuIds || [];
     checkboxes.forEach(cb => {
         cb.checked = gpusToSelect.includes(cb.value);
     });
 
-    // Trigger UI updates
     if (typeof window.toggleDeployModeUI === 'function') window.toggleDeployModeUI();
     if (typeof window.validateDeployGpus === 'function') window.validateDeployGpus();
-
-    const modalEl = document.getElementById('deployModal');
-    if (!modalEl.classList.contains('show')) {
-        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-        modal.show();
-    }
 }
 
 function getFormData() {
@@ -642,9 +775,13 @@ async function submitDeployment() {
             body: JSON.stringify(data)
         });
         if (res.ok) {
-            showAlert("success", "Deployment created successfully!");
-            bootstrap.Modal.getInstance(document.getElementById('deployModal')).hide();
-            fetchStatus();
+            if (window.location.pathname === '/deploy') {
+                window.location.href = '/?deployed=1';
+            } else {
+                showAlert("success", "Deployment created successfully!");
+                bootstrap.Modal.getInstance(document.getElementById('deployModal'))?.hide();
+                fetchStatus();
+            }
         } else {
             const err = await res.json();
             showAlert("danger", "Failed to deploy: " + (err.detail || res.statusText));

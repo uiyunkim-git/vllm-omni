@@ -1,15 +1,30 @@
 {% extends 'base.html' %}
 
 {% block content %}
-<h3 class="mb-4"><i class="fa-solid fa-diagram-project me-2"></i>Worker Node Endpoints</h3>
-
-<h5 class="mt-4 mb-3 text-warning"><i class="fa-solid fa-clock me-2"></i>Pending Registration</h5>
-<div class="row mb-5" id="pending-endpoints-container">
-    <!-- Populated by JS -->
+<div class="d-flex align-items-center mb-4">
+    <i class="fa-solid fa-diagram-project me-2 text-secondary"></i>
+    <h4 class="fw-bold mb-0">Worker Node Endpoints</h4>
 </div>
 
-<h5 class="mt-4 mb-3 text-success"><i class="fa-solid fa-circle-check me-2"></i>Active Endpoints</h5>
-<div class="row mb-5" id="active-endpoints-container">
-    <!-- Populated by JS -->
+<!-- Pending Registration -->
+<div class="mb-5">
+    <div class="section-title">
+        <i class="fa-solid fa-clock me-1"></i>Pending Registration
+    </div>
+    <div class="row g-3" id="pending-endpoints-container">
+        <!-- Populated by JS -->
+    </div>
+</div>
+
+<!-- Active Endpoints -->
+<div class="mb-4">
+    <div class="section-title">
+        <i class="fa-solid fa-circle-check me-1"></i>Active Endpoints
+    </div>
+    <div class="card table-card">
+        <div id="active-endpoints-container">
+            <!-- Populated by JS -->
+        </div>
+    </div>
 </div>
 {% endblock %}

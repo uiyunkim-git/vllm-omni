@@ -11,6 +11,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +24,7 @@ type Backend struct {
 	URL            *url.URL
 	Proxy          *httputil.ReverseProxy
 	ActiveRequests int32
+	CachedModelID  string
 }
 
 type Config struct {
@@ -29,11 +32,71 @@ type Config struct {
 	Models    map[string][]*Backend `json:"models"`
 }
 
+type ModelMetrics struct {
+	activeRequests  int64
+	completedCount  int64 // reset every second
+	RPS             float64
+	mu              sync.Mutex
+}
+
 var (
-	configMutex sync.RWMutex
-	appConfig   Config
+	configMutex  sync.RWMutex
+	appConfig    Config
 	routingMutex sync.Mutex
+
+	metricsMu    sync.RWMutex
+	modelMetrics = make(map[string]*ModelMetrics)
 )
+
+func getOrCreateMetrics(modelName string) *ModelMetrics {
+	metricsMu.RLock()
+	m, ok := modelMetrics[modelName]
+	metricsMu.RUnlock()
+	if ok {
+		return m
+	}
+	metricsMu.Lock()
+	if m, ok = modelMetrics[modelName]; !ok {
+		m = &ModelMetrics{}
+		modelMetrics[modelName] = m
+	}
+	metricsMu.Unlock()
+	return m
+}
+
+func metricsLoop() {
+	ticker := time.NewTicker(time.Second)
+	for range ticker.C {
+		metricsMu.RLock()
+		for _, m := range modelMetrics {
+			completed := atomic.SwapInt64(&m.completedCount, 0)
+			m.mu.Lock()
+			m.RPS = float64(completed)
+			m.mu.Unlock()
+		}
+		metricsMu.RUnlock()
+	}
+}
+
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	metricsMu.RLock()
+	out := make(map[string]map[string]interface{}, len(modelMetrics))
+	for name, m := range modelMetrics {
+		m.mu.Lock()
+		rps := m.RPS
+		m.mu.Unlock()
+		out[name] = map[string]interface{}{
+			"active_requests": atomic.LoadInt64(&m.activeRequests),
+			"req_per_sec":     rps,
+		}
+	}
+	metricsMu.RUnlock()
+
+	json.NewEncoder(w).Encode(out)
+}
 
 func loadConfig(path string) error {
 	data, err := os.ReadFile(path)
@@ -86,14 +149,42 @@ func loadConfig(path string) error {
 				jsonErr := fmt.Sprintf(`{"error":{"message":"Upstream vLLM node %s failed: %v","type":"upstream_error","param":null,"code":"502"}}`, targetURL.String(), e)
 				w.Write([]byte(jsonErr))
 			}
-			// We don't need ModifyResponse logging anymore since the outer retryResponseWriter catches it
+			
+			// Attach the stream filter interceptor for <think> tag removal
+			proxy.ModifyResponse = streamFilterInterceptor
+			
 			b.Proxy = proxy
+			
+			// Asynchronously cache the backend's true Model ID for transparent rewriting
+			go func(b *Backend) {
+				client := &http.Client{
+					Timeout: 5 * time.Second,
+					Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+				}
+				resp, err := client.Get(fmt.Sprintf("%s/v1/models", b.URL.String()))
+				if err == nil {
+					defer resp.Body.Close()
+					var modelsResp struct {
+						Data []struct {
+							Id string `json:"id"`
+						} `json:"data"`
+					}
+					if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err == nil && len(modelsResp.Data) > 0 {
+						b.CachedModelID = modelsResp.Data[0].Id
+					}
+				}
+			}(b)
 		}
 	}
 
 	configMutex.Lock()
 	appConfig = newConfig
 	configMutex.Unlock()
+
+	// Pre-create metrics entries for all configured models
+	for modelName := range newConfig.Models {
+		getOrCreateMetrics(modelName)
+	}
 
 	log.Println("Configuration reloaded successfully")
 	return nil
@@ -113,6 +204,18 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
+
+// A captureResponseWriter intercepts responses without embedding HTTP components
+// to avoid data races during concurrent proxy requests.
+type captureResponseWriter struct {
+	statusCode int
+	body       *bytes.Buffer
+	header     http.Header
+}
+
+func (w *captureResponseWriter) Header() http.Header { return w.header }
+func (w *captureResponseWriter) WriteHeader(statusCode int) { w.statusCode = statusCode }
+func (w *captureResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
 
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	configMutex.RLock()
@@ -164,27 +267,127 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		r.ContentLength = int64(len(bodyBytes))
 	} else if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		// Mock models list or pass to random node
-		for _, backends := range currentConfig.Models {
-			if len(backends) > 0 {
-				backends[0].Proxy.ServeHTTP(w, r)
-				return
+		// Concurrently query one backend per configured model to gather metadata,
+		// overriding the id with the proxy's configured served name.
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		merged := make(map[string]json.RawMessage)
+
+		for modelName, backends := range currentConfig.Models {
+			if len(backends) == 0 {
+				continue
 			}
+
+			wg.Add(1)
+			go func(mName string, bList []*Backend) {
+				defer wg.Done()
+
+				// Need to handle panics safely
+				defer func() {
+					if err := recover(); err != nil {
+						log.Printf("Recovered from panic during model aggregation for %s: %v", mName, err)
+					}
+				}()
+
+				var validItem json.RawMessage
+
+				// Try the available backends for this model
+				for _, b := range bList {
+					rec := &captureResponseWriter{
+						statusCode: http.StatusOK,
+						body:       &bytes.Buffer{},
+						header:     make(http.Header),
+					}
+
+					rClone := r.Clone(r.Context())
+					rClone.Header.Del("Origin")
+
+					b.Proxy.ServeHTTP(rec, rClone)
+
+					if rec.statusCode >= 200 && rec.statusCode < 300 {
+						var resp struct {
+							Data []json.RawMessage `json:"data"`
+						}
+						if err := json.Unmarshal(rec.body.Bytes(), &resp); err == nil && len(resp.Data) > 0 {
+							var obj map[string]interface{}
+							// Take the first returned model block from the backend as the template
+							if err := json.Unmarshal(resp.Data[0], &obj); err == nil {
+								obj["id"] = mName
+								obj["root"] = mName
+								if newItem, err := json.Marshal(obj); err == nil {
+									validItem = newItem
+									break
+								}
+							}
+						}
+					}
+				}
+
+				if validItem == nil {
+					// Fallback to mock block if all backends for this model fail
+					now := time.Now().Unix()
+					mockStr := fmt.Sprintf(`{"id":"%s","object":"model","created":%d,"owned_by":"vllm","root":"%s","parent":null,"max_model_len":32768,"permission":[{"id":"modelperm-mock","object":"model_permission","created":%d,"allow_create_engine":false,"allow_sampling":true,"allow_logprobs":true,"allow_search_indices":false,"allow_view":true,"allow_fine_tuning":false,"organization":"*","group":null,"is_blocking":false}]}`, mName, now, mName, now)
+					validItem = json.RawMessage(mockStr)
+				}
+
+				mu.Lock()
+				merged[mName] = validItem
+				mu.Unlock()
+			}(modelName, backends)
 		}
+
+		wg.Wait()
+
+		// Sort by ID for deterministic output
+		var modelNames []string
+		for name := range merged {
+			modelNames = append(modelNames, name)
+		}
+		sort.Strings(modelNames)
+
+		var finalData []json.RawMessage
+		for _, name := range modelNames {
+			finalData = append(finalData, merged[name])
+		}
+
+		if finalData == nil {
+			finalData = []json.RawMessage{}
+		}
+
+		finalResp := map[string]interface{}{
+			"object": "list",
+			"data":   finalData,
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"object":"list","data":[]}`))
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(finalResp)
 		return
 	}
 
-	// Fallback alias resolution: "gpt-oss-120b" vs "openai/gpt-oss-120b"
+	// Fallback alias resolution dynamically matching backend identities
+	resolvedModelName := requestedModel
 	backends, ok := currentConfig.Models[requestedModel]
 	if !ok || len(backends) == 0 {
-		if len(requestedModel) > 7 && requestedModel[:7] == "openai/" {
-			stripped := requestedModel[7:]
-			backends, ok = currentConfig.Models[stripped]
-		} else if len(requestedModel) > 0 {
-			prefixed := "openai/" + requestedModel
-			backends, ok = currentConfig.Models[prefixed]
+		for k, vList := range currentConfig.Models {
+			if strings.EqualFold(k, requestedModel) || strings.EqualFold("openai/"+k, requestedModel) || strings.EqualFold("vllm/"+k, requestedModel) {
+				backends = vList
+				resolvedModelName = k
+				ok = true
+				break
+			}
+			// If requestedModel exactly matches the backend's actual model id
+			for _, b := range vList {
+				if b.CachedModelID != "" && strings.EqualFold(b.CachedModelID, requestedModel) {
+					backends = vList
+					resolvedModelName = k
+					ok = true
+					break
+				}
+			}
+			if ok {
+				break
+			}
 		}
 	}
 
@@ -198,6 +401,10 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	maxRetries := 10
 	var lastErrResponse *http.Response
 	var lastErrBody []byte
+
+	metrics := getOrCreateMetrics(resolvedModelName)
+	atomic.AddInt64(&metrics.activeRequests, 1)
+	defer atomic.AddInt64(&metrics.activeRequests, -1)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var bestBackend *Backend
@@ -232,15 +439,40 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			header:         make(http.Header),
 		}
 
-		// Reset request body for the proxy if we already consumed it
+		// Reset request body and rewrite the model field if there's a mismatch
 		if r.Method == http.MethodPost && bodyBytes != nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			if bestBackend.CachedModelID != "" && bestBackend.CachedModelID != requestedModel {
+				var genericMap map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &genericMap); err == nil {
+					// Translate to the expected model ID
+					genericMap["model"] = bestBackend.CachedModelID
+					if newBody, err := json.Marshal(genericMap); err == nil {
+						r.Body = io.NopCloser(bytes.NewReader(newBody))
+						r.ContentLength = int64(len(newBody))
+						r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+					} else {
+						r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					}
+				} else {
+					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+			} else {
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
 		}
+
+		// Prevent downstream Ollama containers from enforcing their own CORS policies based on the Origin header,
+		// since we handle CORS centrally here.
+		r.Header.Del("Origin")
 
 		bestBackend.Proxy.ServeHTTP(rec, r)
 		
 		atomic.AddInt32(&bestBackend.ActiveRequests, -1)
 		log.Printf("[Completed] Route %s -> %s (Status: %d)", requestedModel, bestBackend.URL.String(), rec.statusCode)
+
+		if rec.statusCode < 500 {
+			atomic.AddInt64(&metrics.completedCount, 1)
+		}
 
 		// Check if we need to retry
 		if rec.statusCode >= 500 {
@@ -307,8 +539,11 @@ func main() {
 		log.Printf("Warning: initial config load failed: %v", err)
 	}
 
+	go metricsLoop()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/reload", reloadHandler)
+	mux.HandleFunc("/stats", statsHandler)
 	mux.HandleFunc("/", proxyHandler)
 
 	port := os.Getenv("PORT")

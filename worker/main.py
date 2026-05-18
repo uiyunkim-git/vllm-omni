@@ -27,6 +27,8 @@ class WorkerDeployRequest(BaseModel):
     replica_id: str
     name: str
     model: str
+    served_model_name: Optional[str] = None
+    is_embedding: bool = False
     engine: Optional[str] = "vllm"
     gpus: List[int]
     tp: int = 1

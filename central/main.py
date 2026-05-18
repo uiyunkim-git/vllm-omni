@@ -24,6 +24,7 @@ class DeployRequest(BaseModel):
     deployment_type: str # "replicas" or "tp"
     model: str
     served_model_name: Optional[str] = None
+    is_embedding: bool = False
     engine: Optional[str] = "vllm"
     gpus: List[str] # Global GPU IDs e.g., ["alpha-worker-1-0", "alpha-worker-1-1"]
     tp: int = 1
@@ -59,6 +60,10 @@ async def read_endpoints(request: Request):
 @app.get("/gateway", response_class=HTMLResponse)
 async def read_gateway(request: Request):
     return templates.TemplateResponse("gateway.html", {"request": request, "active_tab": "gateway"})
+
+@app.get("/deploy", response_class=HTMLResponse)
+async def deploy_page(request: Request):
+    return templates.TemplateResponse("deploy.html", {"request": request, "active_tab": "dashboard"})
 
 @app.get("/logs/{deploy_id}", response_class=HTMLResponse)
 async def read_logs_page(request: Request, deploy_id: str):
@@ -99,7 +104,7 @@ async def save_config(req: ConfigSaveRequest):
     manager.save_config(req.dict())
     return {"status": "success"}
 
-@app.delete("/api/configs/{name}")
+@app.delete("/api/configs/{name:path}")
 async def delete_config(name: str):
     success = manager.delete_config(name)
     if not success:
@@ -120,6 +125,15 @@ async def stop_deployment(deployment_id: str):
     if not success:
         raise HTTPException(status_code=404, detail="Deployment not found")
     return {"status": "success"}
+
+@app.get("/api/proxy_stats")
+async def get_proxy_stats():
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("http://vllm_omni_proxy:4000/stats", timeout=2.0)
+            return resp.json()
+    except Exception:
+        return {}
 
 @app.get("/api/deployments/{deploy_id}/logs")
 async def get_deployment_logs(deploy_id: str, container_name: Optional[str] = None):

@@ -7,8 +7,11 @@ services:
     restart: unless-stopped
     environment:
       - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS="*"
     expose:
       - "11434"
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: [ "ollama serve & sleep 5 && ollama pull '{{ model_name }}' && wait" ]
     volumes:
       - "{{ host_data_dir }}:/root/.ollama"
     deploy:

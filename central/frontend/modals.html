@@ -1,114 +1,147 @@
 <div class="modal fade" id="deployModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Deploy New Model</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <div>
+                    <h5 class="modal-title fw-bold mb-0">Deploy New Model</h5>
+                    <p class="text-muted small mb-0 mt-1">새 모델을 배포하거나 저장된 설정을 불러옵니다.</p>
+                </div>
+                <button type="button" class="btn-close ms-3" data-bs-dismiss="modal"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body px-4 py-3">
                 <form id="deployForm">
-                    <div class="mb-3 p-3 bg-light border border-info rounded">
-                        <label class="form-label fw-bold text-info-emphasis"><i
-                                class="fa-solid fa-file-import me-2"></i>Load from Saved Configuration</label>
-                        <select class="form-select form-select-sm" id="configSelector" onchange="applySelectedConfig()">
-                            <option value="">-- Select a Config (Optional) --</option>
-                        </select>
-                        <div class="form-text mt-2"><i class="fa-solid fa-circle-info me-1"></i>Selecting a saved config
-                            will auto-fill the entire form below.</div>
-                    </div>
-                    <hr class="text-muted">
-                    <div class="mb-3">
-                        <label class="form-label">Deployment Name</label>
-                        <input type="text" class="form-control" id="deployName" required
-                            placeholder="e.g., prod-llama-3">
-                    </div>
-                    <div class="row mb-3">
-                        <div class="col-md-6">
-                            <label class="form-label">HF Model ID / Ollama Model Name</label>
-                            <input type="text" class="form-control" id="deployModel" required
-                                placeholder="meta-llama/Meta-Llama-3-8B-Instruct">
-                            <div class="mt-2">
-                                <label class="form-label form-label-sm m-0">Served Model Name (Optional)</label>
-                                <input type="text" class="form-control form-control-sm" id="deployServedModel"
-                                    placeholder="e.g. gpt-oss-120b-A">
-                                <div class="form-text" style="font-size: 0.75rem;">Overrides model name in API routing.
+                    <div class="row g-4">
+
+                        <!-- LEFT COLUMN: 배포 설정 -->
+                        <div class="col-md-5 d-flex flex-column gap-3">
+
+                            <!-- Load config -->
+                            <div>
+                                <div class="section-title"><i class="fa-solid fa-file-import me-1"></i>저장된 설정</div>
+                                <div class="p-3 rounded-3" style="background:#f0f9ff;border:1px solid #bae6fd">
+                                    <select class="form-select form-select-sm" id="configSelector" onchange="applySelectedConfig()">
+                                        <option value="">-- 설정 선택 (선택사항) --</option>
+                                    </select>
                                 </div>
                             </div>
-                            <div class="mt-2">
-                                <label class="form-label">Engine</label>
-                                <select class="form-select form-select-sm" id="deployEngine">
-                                    <option value="vllm" selected>vLLM</option>
-                                    <option value="ollama">Ollama</option>
+
+                            <!-- Deployment name -->
+                            <div>
+                                <div class="section-title">기본 정보</div>
+                                <div class="mb-2">
+                                    <label class="form-label small fw-semibold mb-1">배포 이름</label>
+                                    <input type="text" class="form-control form-control-sm" id="deployName" required placeholder="e.g., prod-llama-3">
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small fw-semibold mb-1">모델 ID</label>
+                                    <input type="text" class="form-control form-control-sm" id="deployModel" required placeholder="meta-llama/Meta-Llama-3-8B-Instruct">
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small fw-semibold mb-1">Served Name <span class="text-muted fw-normal">(선택)</span></label>
+                                    <input type="text" class="form-control form-control-sm" id="deployServedModel" placeholder="e.g. gpt-oss-120b">
+                                    <div class="form-text" style="font-size:.82rem">API 라우팅에서 사용할 이름. 공백 시 모델 ID 사용.</div>
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold mb-1">엔진</label>
+                                    <select class="form-select form-select-sm" id="deployEngine">
+                                        <option value="vllm" selected>vLLM</option>
+                                        <option value="ollama">Ollama</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <!-- Serving type -->
+                            <div>
+                                <div class="section-title">서빙 방식</div>
+                                <div class="d-flex flex-column gap-2">
+                                    <label class="p-3 rounded-3 border d-flex align-items-start gap-2"
+                                        style="cursor:pointer" id="label-replicas"
+                                        onclick="document.getElementById('typeReplicas').click()">
+                                        <input class="form-check-input mt-0 flex-shrink-0" type="radio" name="deployType"
+                                            id="typeReplicas" value="replicas" checked onchange="toggleDeployModeUI()">
+                                        <div>
+                                            <div class="small fw-semibold">Independent Replicas</div>
+                                            <div class="text-muted" style="font-size:.82rem">GPU 당 컨테이너 1개, 로드 밸런싱</div>
+                                        </div>
+                                    </label>
+                                    <label class="p-3 rounded-3 border d-flex align-items-start gap-2"
+                                        style="cursor:pointer" id="label-tp"
+                                        onclick="document.getElementById('typeTp').click()">
+                                        <input class="form-check-input mt-0 flex-shrink-0" type="radio" name="deployType"
+                                            id="typeTp" value="tp" onchange="toggleDeployModeUI()">
+                                        <div>
+                                            <div class="small fw-semibold">Tensor Parallelism</div>
+                                            <div class="text-muted" style="font-size:.82rem">여러 GPU에 모델 분산 (TP)</div>
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <!-- RIGHT COLUMN: GPU 선택 + 옵션 -->
+                        <div class="col-md-7 d-flex flex-column gap-3">
+
+                            <!-- TP node selector -->
+                            <div id="tpNodeSelector" style="display:none">
+                                <div class="section-title">대상 노드</div>
+                                <select class="form-select form-select-sm" id="deployTargetNode" onchange="filterGpusByNode()">
+                                    <option value="">-- 노드 선택 --</option>
                                 </select>
                             </div>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Serving Type</label>
-                            <div class="mb-2">
-                                <div class="form-check mb-1">
-                                    <input class="form-check-input" type="radio" name="deployType" id="typeReplicas"
-                                        value="replicas" checked onchange="toggleDeployModeUI()">
-                                    <label class="form-check-label" for="typeReplicas">Independent Replicas <br><small
-                                            class="text-muted">Spawns 1 container per selected GPU, load
-                                            balanced.</small></label>
+
+                            <!-- GPU grid -->
+                            <div>
+                                <div class="section-title">GPU 선택</div>
+                                <div id="deployGpusGrid"
+                                    class="d-flex flex-wrap gap-2 p-2 rounded-3"
+                                    style="height:300px;overflow-y:auto;overflow-x:hidden;background:#f8f9fa;border:1px solid #e5e7eb;min-height:80px;align-content:flex-start">
                                 </div>
-                                <div class="form-check mb-1">
-                                    <input class="form-check-input" type="radio" name="deployType" id="typeTp"
-                                        value="tp" onchange="toggleDeployModeUI()">
-                                    <label class="form-check-label" for="typeTp">Tensor Parallelism <br><small
-                                            class="text-muted">A single massive container striped across X
-                                            GPUs.</small></label>
+                                <div class="form-text mt-1" id="deployGpusHelp" style="font-size:.82rem">
+                                    GPU를 선택하세요. 각 GPU에 독립적인 레플리카가 실행됩니다.
+                                </div>
+                                <div class="text-warning small mt-1" id="tpWarningText" style="display:none">
+                                    <i class="fa-solid fa-triangle-exclamation me-1"></i>TP는 1, 2, 4, 8개 GPU만 지원합니다.
                                 </div>
                             </div>
-                        </div>
-                    </div>
 
-                    <div id="tpNodeSelector" class="mb-3" style="display: none;">
-                        <label class="form-label">Select Target Node</label>
-                        <select class="form-select" id="deployTargetNode" onchange="filterGpusByNode()">
-                            <option value="">-- Select a Node --</option>
-                            <!-- Populated by JS -->
-                        </select>
-                    </div>
+                            <!-- Options -->
+                            <div>
+                                <div class="section-title">배포 옵션</div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-4" id="tpDisplayContainer" style="display:none">
+                                        <label class="form-label small fw-semibold mb-1">Tensor Parallel 수</label>
+                                        <input type="number" class="form-control form-control-sm" id="deployTp" value="1" disabled>
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold mb-1">Max Model Length</label>
+                                        <input type="number" class="form-control form-control-sm" id="deployMaxLen" placeholder="기본값 사용">
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold mb-1">GPU Memory Util</label>
+                                        <input type="number" class="form-control form-control-sm" id="deployGpuUtil"
+                                            value="0.9" step="0.05" min="0.1" max="1.0">
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="form-label small fw-semibold mb-1">추가 엔진 인수 <span class="text-muted fw-normal">(선택)</span></label>
+                                    <input type="text" class="form-control form-control-sm" id="deployExtraArgs"
+                                        placeholder="--trust-remote-code --max-num-seqs 64">
+                                    <div class="form-text" style="font-size:.82rem">엔진에 직접 전달되는 커맨드라인 플래그</div>
+                                </div>
+                            </div>
 
-                    <div class="mb-3">
-                        <label class="form-label">Select GPUs</label>
-                        <div id="deployGpusGrid" class="d-flex flex-wrap gap-2 mb-2 p-2 border rounded bg-light"
-                            style="max-height: 200px; overflow-y: auto;">
-                            <!-- Populated by JS -->
                         </div>
-                        <div class="form-text" id="deployGpusHelp">Select multiple GPUs. Each selected GPU
-                            will run a separate 1-GPU replica.</div>
-                    </div>
-                    <div class="row mb-3">
-                        <div class="col-md-4" id="tpDisplayContainer" style="display: none;">
-                            <label class="form-label">Calculated TP</label>
-                            <input type="number" class="form-control" id="deployTp" value="1" disabled>
-                            <div class="form-text text-warning" id="tpWarningText" style="display: none;">Must be 1, 2,
-                                4, or 8 GPUs.</div>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label">Max Model Length</label>
-                            <input type="number" class="form-control" id="deployMaxLen" placeholder="Optional">
-                            <div class="form-text">Leave blank for default</div>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label">GPU Memory Utilization</label>
-                            <input type="number" class="form-control" id="deployGpuUtil" value="0.9" step="0.05"
-                                min="0.1" max="1.0">
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Additional vLLM Arguments</label>
-                        <input type="text" class="form-control" id="deployExtraArgs"
-                            placeholder="e.g., --trust-remote-code --max-num-seqs 64">
-                        <div class="form-text">Arbitrary command-line flags passed directly to the vLLM engine.</div>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" onclick="triggerSaveConfig()">Save Config</button>
-                <button type="button" class="btn btn-primary" onclick="submitDeployment()">Deploy</button>
+            <div class="modal-footer gap-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm px-3" onclick="triggerSaveConfig()">
+                    <i class="fa-solid fa-floppy-disk me-1"></i>설정 저장
+                </button>
+                <button type="button" class="btn btn-primary btn-sm px-4" onclick="submitDeployment()">
+                    <i class="fa-solid fa-rocket me-1"></i>Deploy
+                </button>
             </div>
         </div>
     </div>

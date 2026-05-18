@@ -31,10 +31,6 @@ services:
       - "/app/vllm.key"
       - --ssl-certfile
       - "/app/vllm.crt"
-{% if task == 'embed' %}
-      - --task
-      - embed
-{% endif %}
 {% if tensor_parallel_size > 1 %}
       - --tensor-parallel-size
       - "{{ tensor_parallel_size }}"
