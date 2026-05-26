@@ -35,6 +35,13 @@ class WorkerDeployRequest(BaseModel):
     max_len: Optional[int] = None
     gpu_util: Optional[float] = 0.9
     extra_args: Optional[str] = None
+    vllm_image: Optional[str] = None
+
+class PullImageRequest(BaseModel):
+    image: str
+
+class DownloadModelRequest(BaseModel):
+    model_id: str
 
 @app.on_event("startup")
 async def startup_event():
@@ -76,6 +83,13 @@ async def stop_deployment(deploy_id: str):
         raise HTTPException(status_code=404, detail="Deployment not found")
     return {"status": "success"}
 
+@app.post("/api/internal/stop_replica/{deploy_id}/{global_gpu_id}")
+async def stop_replica(deploy_id: str, global_gpu_id: str):
+    success = manager.stop_replica(deploy_id, global_gpu_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Replica not found")
+    return {"status": "success"}
+
 @app.get("/api/internal/logs/{deploy_id}")
 async def get_deployment_logs(deploy_id: str, container_name: Optional[str] = None):
     # Check if deployment exists on this worker
@@ -91,5 +105,30 @@ async def get_deployment_logs(deploy_id: str, container_name: Optional[str] = No
                 
     if not target_nodes:
         raise HTTPException(status_code=404, detail="Deployment or container not found on this worker.")
-        
+
     return StreamingResponse(manager.stream_logs(target_nodes), media_type="text/event-stream")
+
+@app.get("/api/internal/images")
+async def list_images():
+    return manager.list_vllm_images()
+
+@app.post("/api/internal/images/pull")
+async def pull_image(req: PullImageRequest):
+    return StreamingResponse(manager.pull_image_stream(req.image), media_type="text/plain")
+
+@app.get("/api/internal/models")
+async def list_hf_models():
+    return manager.list_hf_models()
+
+@app.post("/api/internal/models/download")
+async def download_model(req: DownloadModelRequest):
+    job_id = manager.start_download_job(req.model_id)
+    return {"job_id": job_id}
+
+@app.get("/api/internal/models/jobs")
+async def list_model_jobs():
+    return manager.list_download_jobs()
+
+@app.get("/api/internal/models/jobs/{job_id}/logs")
+async def stream_job_logs(job_id: str, offset: int = 0):
+    return StreamingResponse(manager.stream_job_logs(job_id, offset), media_type="text/plain")

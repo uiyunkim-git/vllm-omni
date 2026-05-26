@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   {{ node_name }}:
-    image: vllm/vllm-openai:latest
+    image: {{ vllm_image | default('vllm/vllm-openai:latest') }}
     container_name: {{ node_name }}
     restart: unless-stopped
     environment:

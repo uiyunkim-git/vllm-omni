@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block content %}
+<span id="ep-init" data-wid="{{ worker.id }}" class="d-none"></span>
+
+<nav aria-label="breadcrumb" class="mb-4">
+    <ol class="breadcrumb small">
+        <li class="breadcrumb-item"><a href="/endpoints">Endpoints</a></li>
+        <li class="breadcrumb-item active">{{ worker.name }} — Docker Images</li>
+    </ol>
+</nav>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div class="d-flex align-items-center gap-3">
+        <i class="fa-brands fa-docker" style="color:#2496ED;font-size:1.6rem"></i>
+        <div>
+            <h4 class="fw-bold mb-0">Docker Images</h4>
+            <div class="text-muted small mt-1">
+                <span class="fw-semibold me-1">{{ worker.name }}</span>
+                <span class="font-monospace">{{ worker.host }}:{{ worker.port }}</span>
+                <span class="badge bg-secondary ms-2">{{ worker.gpus | length }} GPUs</span>
+            </div>
+        </div>
+    </div>
+    <button class="btn btn-outline-secondary" onclick="doRefreshImages()">
+        <i class="fa-solid fa-rotate-right me-1"></i>Refresh
+    </button>
+</div>
+
+<div class="card">
+    <div class="card-body p-4" id="ep-panel-container">
+        <div class="text-muted small">Loading...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function () {
+    const wid = document.getElementById('ep-init').dataset.wid;
+    const safeWid = escapeHtml(wid);
+    const container = document.getElementById('ep-panel-container');
+
+    // Wrap the container so _doPullImage can query '#img-panel-{safeWid} button'
+    const outer = document.createElement('div');
+    outer.id = 'img-panel-' + safeWid;
+    const inner = document.createElement('div');
+    inner.id = 'img-panel-body-' + safeWid;
+    outer.appendChild(inner);
+    container.replaceChildren(outer);
+
+    renderImagePanelBody(wid, inner);
+
+    window.doRefreshImages = async function () {
+        if (pullInProgress.has(wid)) return;
+        epImages.delete(wid);
+        await renderImagePanelBody(wid, document.getElementById('img-panel-body-' + safeWid));
+    };
+})();
+</script>
+{% endblock %}

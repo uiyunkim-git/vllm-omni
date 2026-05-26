@@ -35,6 +35,10 @@
         .stat-idle   { background: #f3f4f6; color: #6b7280; }
         .stat-rps    { background: #dbeafe; color: #1d4ed8; }
 
+        .throughput-chart-card .card-body { padding: .85rem 1rem 1rem; }
+        .throughput-chart-wrap { position: relative; height: 260px; min-height: 220px; }
+        @media (max-width: 767.98px) { .throughput-chart-wrap { height: 220px; } }
+
         /* Table inside card */
         .table-card { border-radius: 10px; overflow: hidden; }
         .table-card .table { margin: 0; }
@@ -155,6 +159,7 @@
         window.activeTab = "{{ active_tab }}";
     </script>
     <script src="/static/app.js"></script>
+    {% block extra_scripts %}{% endblock %}
 </body>
 
 </html>

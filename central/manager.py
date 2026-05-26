@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class CentralManager:
     def __init__(self):
         self.env = Environment(loader=FileSystemLoader('/app/templates'))
+        self._dep_lock = asyncio.Lock()
         db.init_db()
 
     def register_worker(self, worker_id: str, host: str, port: int, gpus: list):
@@ -251,7 +252,8 @@ class CentralManager:
                             "tp": 1,
                             "max_len": req.get("max_len"),
                             "gpu_util": req.get("gpu_util"),
-                            "extra_args": req.get("extra_args")
+                            "extra_args": req.get("extra_args"),
+                            "vllm_image": req.get("vllm_image") or None
                         }
                         
                         resp = await client.post(worker_url, json=worker_req, timeout=600.0)
@@ -290,7 +292,8 @@ class CentralManager:
                     "tp": len(gpus), # Explicitly set TP to GPU count
                     "max_len": req.get("max_len"),
                     "gpu_util": req.get("gpu_util"),
-                    "extra_args": req.get("extra_args")
+                    "extra_args": req.get("extra_args"),
+                    "vllm_image": req.get("vllm_image") or None
                 }
                 
                 resp = await client.post(worker_url, json=worker_req, timeout=600.0)
@@ -306,26 +309,28 @@ class CentralManager:
                         "is_healthy": False
                     })
         
-        dep["status"] = "running"
         existing_deps.append(dep)
         self.save_deployments(existing_deps)
-        
+
         self.reload_go_proxy(existing_deps)
         return dep
 
     async def stop_deployment(self, deploy_id: str):
-        deps = self.load_deployments()
-        dep_index = -1
-        for i, d in enumerate(deps):
-            if d["id"] == deploy_id:
-                dep_index = i
-                break
-                
-        if dep_index == -1: return False
-        dep = deps[dep_index]
-        
-        # We need to tell the workers to stop it.
-        # Figure out which workers are involved
+        async with self._dep_lock:
+            deps = self.load_deployments()
+            dep_index = -1
+            for i, d in enumerate(deps):
+                if d["id"] == deploy_id:
+                    dep_index = i
+                    break
+
+            if dep_index == -1:
+                return False
+            dep = deps[dep_index]
+
+            del deps[dep_index]
+            self.save_deployments(deps)
+
         wids = set()
         for global_gpu_id in dep["gpus"]:
             wid, _ = global_gpu_id.rsplit("-", 1)
@@ -342,8 +347,42 @@ class CentralManager:
                     except Exception as e:
                         logger.error(f"Failed to stop deployment {deploy_id} on worker {wid}: {e}")
 
-        del deps[dep_index]
-        self.save_deployments(deps)
+        self.reload_go_proxy(deps)
+        return True
+
+    async def stop_replica(self, deploy_id: str, global_gpu_id: str):
+        # Hold lock only for the DB read-modify-write to prevent concurrent calls
+        # from overwriting each other's changes.
+        async with self._dep_lock:
+            deps = self.load_deployments()
+            dep_index = next((i for i, d in enumerate(deps) if d["id"] == deploy_id), -1)
+            if dep_index == -1:
+                return False
+
+            dep = deps[dep_index]
+            if global_gpu_id not in dep["gpus"]:
+                return False
+
+            dep["gpus"].remove(global_gpu_id)
+            if not dep["gpus"]:
+                del deps[dep_index]
+            else:
+                deps[dep_index] = dep
+
+            self.save_deployments(deps)
+
+        # Worker call outside the lock — can be slow and doesn't touch shared state
+        wid, _ = global_gpu_id.rsplit("-", 1)
+        all_workers = self.get_workers()
+        if wid in all_workers:
+            worker = all_workers[wid]
+            worker_url = f"http://{worker['host']}:{worker['port']}/api/internal/stop_replica/{deploy_id}/{global_gpu_id}"
+            async with httpx.AsyncClient() as client:
+                try:
+                    await client.post(worker_url, timeout=60.0)
+                except Exception as e:
+                    logger.error(f"Failed to stop replica {global_gpu_id} of {deploy_id}: {e}")
+
         self.reload_go_proxy(deps)
         return True
 
@@ -374,30 +413,34 @@ class CentralManager:
             if wid not in all_workers:
                 await queue.put(f"data: [Central] Worker {wid} is offline/unregistered.\n\n")
                 return
-                
+
             worker = all_workers[wid]
             worker_url = f"http://{worker['host']}:{worker['port']}/api/internal/logs/{deploy_id}"
             if container_name:
                 worker_url += f"?container_name={container_name}"
-            
-            try:
-                # We use a long timeout since this is a persistent SSE connection
-                timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream("GET", worker_url) as response:
-                        if response.status_code != 200:
-                            err_msg = await response.aread()
-                            await queue.put(f"data: [Central-Error] Worker {wid} returned {response.status_code}: {err_msg.decode('utf-8')}\n\n")
-                            return
-                            
-                        async for line in response.aiter_lines():
-                            if line:
-                                # The worker already yields "data: ..." format
-                                await queue.put(f"{line}\n\n")
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                await queue.put(f"data: [Central-Error] Connection to worker {wid} lost: {e}\n\n")
+
+            retry_delay = 2
+            while True:
+                try:
+                    timeout = httpx.Timeout(connect=15.0, read=None, write=10.0, pool=10.0)
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        async with client.stream("GET", worker_url) as response:
+                            if response.status_code != 200:
+                                err_msg = await response.aread()
+                                await queue.put(f"data: [Central-Error] Worker {wid} returned {response.status_code}: {err_msg.decode('utf-8')}\n\n")
+                                return
+                            retry_delay = 2
+                            async for line in response.aiter_lines():
+                                if line:
+                                    await queue.put(f"{line}\n\n")
+                    # Stream ended cleanly (worker closed connection)
+                    return
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    await queue.put(f"data: [Central-Error] Connection to worker {wid} lost: {e} — reconnecting in {retry_delay}s...\n\n")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
 
         for wid in wids:
             tasks.append(asyncio.create_task(fetch_stream(wid)))
@@ -424,12 +467,20 @@ class CentralManager:
                 model_name = d.get("served_model_name") or d.get("model", "default_model")
                 if model_name not in models_map:
                     models_map[model_name] = []
-                for node in d.get("nodes", []):
-                    if node.get("is_healthy"):
-                        models_map[model_name].append({
-                            "host": node["host"],
-                            "port": node["port"] + 40000
-                        })
+                healthy_nodes = [n for n in d.get("nodes", []) if n.get("is_healthy")]
+                # If all nodes are temporarily unhealthy, keep all of them rather than
+                # emptying the backend list (which causes request rejection storms)
+                source_nodes = healthy_nodes if healthy_nodes else d.get("nodes", [])
+                seen = set()
+                for node in source_nodes:
+                    key = (node["host"], node["port"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    models_map[model_name].append({
+                        "host": node["host"],
+                        "port": node["port"] + 40000
+                    })
         
         config_data = {
             "auth_token": os.environ.get("VLLM_API_KEY", "bislaprom3#"),
@@ -449,6 +500,9 @@ class CentralManager:
         deps = self.load_deployments()
         changed = False
 
+        # Deduplicate health check targets: same host:port only checked once
+        checked_endpoints: dict = {}  # (host, port) -> bool
+
         async with httpx.AsyncClient(verify=False) as client:
             for dep in deps:
                 if dep["status"] not in ["running", "starting"]:
@@ -457,30 +511,42 @@ class CentralManager:
                 all_healthy = True
                 for node in dep.get("nodes", []):
                     host = node["host"]
-                    # Calculate the API port. Usually port + 40000
                     api_port = node["port"] + 40000
-                    health_path = "/health" if dep.get("engine", "vllm") == "vllm" else "/"
-                    health_url = f"https://{host}:{api_port}{health_path}"
+                    endpoint_key = (host, api_port)
 
-                    try:
-                        resp = await client.get(health_url, timeout=2.0)
-                        is_healthy = resp.status_code == 200
-                    except Exception as e:
-                        # logger.error(f"Health check failed for {health_url}: {e}")
-                        is_healthy = False
-                    
-                    if node.get("is_healthy") != is_healthy:
-                        node["is_healthy"] = is_healthy
-                        changed = True
+                    if endpoint_key not in checked_endpoints:
+                        health_path = "/health" if dep.get("engine", "vllm") == "vllm" else "/"
+                        health_url = f"https://{host}:{api_port}{health_path}"
+                        try:
+                            resp = await client.get(health_url, timeout=8.0)
+                            checked_endpoints[endpoint_key] = resp.status_code == 200
+                        except Exception:
+                            checked_endpoints[endpoint_key] = False
 
-                    if not is_healthy:
+                    is_healthy = checked_endpoints[endpoint_key]
+
+                    # Require 2 consecutive failures before marking unhealthy
+                    # to avoid flapping from transient relay timeouts
+                    if not is_healthy and node.get("is_healthy"):
+                        fail_count = node.get("_fail_count", 0) + 1
+                        node["_fail_count"] = fail_count
+                        if fail_count >= 2:
+                            node["is_healthy"] = False
+                            node["_fail_count"] = 0
+                            changed = True
+                    elif is_healthy:
+                        if not node.get("is_healthy"):
+                            node["is_healthy"] = True
+                            changed = True
+                        node["_fail_count"] = 0
+
+                    if not node.get("is_healthy"):
                         all_healthy = False
 
-                # If all nodes are healthy, mark dep as running securely
                 if all_healthy and dep["status"] == "starting":
                     dep["status"] = "running"
                     changed = True
 
         if changed:
             self.save_deployments(deps)
-            self.reload_go_proxy(deps)
+        self.reload_go_proxy(deps)

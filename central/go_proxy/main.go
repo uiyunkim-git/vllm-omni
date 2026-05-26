@@ -33,11 +33,24 @@ type Config struct {
 }
 
 type ModelMetrics struct {
-	activeRequests  int64
-	completedCount  int64 // reset every second
-	RPS             float64
-	mu              sync.Mutex
+	activeRequests int64
+	completedCount int64 // reset every second
+	RPS            float64
+	RPSAvg30s      float64
+	history        []ThroughputSample
+	mu             sync.Mutex
 }
+
+type ThroughputSample struct {
+	Timestamp int64   `json:"ts"`
+	RPS       float64 `json:"req_per_sec"`
+	RPSAvg30s float64 `json:"req_per_sec_avg_30s"`
+}
+
+const (
+	throughputAverageWindow = 30 * time.Second
+	throughputHistoryWindow = 15 * time.Minute
+)
 
 var (
 	configMutex  sync.RWMutex
@@ -67,11 +80,43 @@ func getOrCreateMetrics(modelName string) *ModelMetrics {
 func metricsLoop() {
 	ticker := time.NewTicker(time.Second)
 	for range ticker.C {
+		now := time.Now()
 		metricsMu.RLock()
 		for _, m := range modelMetrics {
 			completed := atomic.SwapInt64(&m.completedCount, 0)
 			m.mu.Lock()
 			m.RPS = float64(completed)
+			m.history = append(m.history, ThroughputSample{
+				Timestamp: now.Unix(),
+				RPS:       m.RPS,
+			})
+
+			cutoff := now.Add(-throughputHistoryWindow).Unix()
+			firstKept := 0
+			for firstKept < len(m.history) && m.history[firstKept].Timestamp <= cutoff {
+				firstKept++
+			}
+			if firstKept > 0 {
+				copy(m.history, m.history[firstKept:])
+				m.history = m.history[:len(m.history)-firstKept]
+			}
+
+			avgCutoff := now.Add(-throughputAverageWindow).Unix()
+			var sum float64
+			var samples int
+			for i := len(m.history) - 1; i >= 0; i-- {
+				if m.history[i].Timestamp <= avgCutoff {
+					break
+				}
+				sum += m.history[i].RPS
+				samples++
+			}
+			if samples > 0 {
+				m.RPSAvg30s = sum / float64(samples)
+			} else {
+				m.RPSAvg30s = 0
+			}
+			m.history[len(m.history)-1].RPSAvg30s = m.RPSAvg30s
 			m.mu.Unlock()
 		}
 		metricsMu.RUnlock()
@@ -82,15 +127,41 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 
+	// Return stats for all configured models, even if temporarily backend-less
+	configMutex.RLock()
+	activeModels := make(map[string]bool, len(appConfig.Models))
+	for name := range appConfig.Models {
+		activeModels[name] = true
+	}
+	configMutex.RUnlock()
+
 	metricsMu.RLock()
-	out := make(map[string]map[string]interface{}, len(modelMetrics))
-	for name, m := range modelMetrics {
+	out := make(map[string]map[string]interface{}, len(activeModels))
+	for name := range activeModels {
+		m := modelMetrics[name]
+		if m == nil {
+			out[name] = map[string]interface{}{
+				"active_requests":     int64(0),
+				"req_per_sec":         float64(0),
+				"req_per_sec_avg_30s": float64(0),
+				"avg_window_sec":      int(throughputAverageWindow.Seconds()),
+				"history_window_sec":  int(throughputHistoryWindow.Seconds()),
+				"throughput_history":  []ThroughputSample{},
+			}
+			continue
+		}
 		m.mu.Lock()
 		rps := m.RPS
+		avg30s := m.RPSAvg30s
+		history := append([]ThroughputSample(nil), m.history...)
 		m.mu.Unlock()
 		out[name] = map[string]interface{}{
-			"active_requests": atomic.LoadInt64(&m.activeRequests),
-			"req_per_sec":     rps,
+			"active_requests":     atomic.LoadInt64(&m.activeRequests),
+			"req_per_sec":         rps,
+			"req_per_sec_avg_30s": avg30s,
+			"avg_window_sec":      int(throughputAverageWindow.Seconds()),
+			"history_window_sec":  int(throughputHistoryWindow.Seconds()),
+			"throughput_history":  history,
 		}
 	}
 	metricsMu.RUnlock()
@@ -117,10 +188,10 @@ func loadConfig(path string) error {
 				return err
 			}
 			b.URL = targetURL
-			
+
 			proxy := httputil.NewSingleHostReverseProxy(targetURL)
-			
-			// PERFORMANCE TUNING: Go ReverseProxy uses DefaultTransport which restricts 
+
+			// PERFORMANCE TUNING: Go ReverseProxy uses DefaultTransport which restricts
 			// MaxIdleConnsPerHost to just 2. Since our downstream CLI worker blasts
 			// thousands of TCP connections, this bottleneck forces the proxy to drop them (502/500).
 			// We MUST expand the proxy's own connection pool to the backends.
@@ -129,17 +200,16 @@ func loadConfig(path string) error {
 			// is already closing, resulting in random '500 Internal Server Error's under load over LAN.
 			// Setting to 3 seconds preempts Uvicorn safely.
 			// CRITICAL FIX: To definitively rule out Keep-Alive race conditions with
-			// remote Uvicorn nodes dropping TCP connections unexpectedly, we will 
+			// remote Uvicorn nodes dropping TCP connections unexpectedly, we will
 			// disable Keep-Alives entirely and force a fresh TCP socket per request.
 			proxy.Transport = &http.Transport{
 				MaxIdleConns:        4000,
 				MaxIdleConnsPerHost: 1000,
 				MaxConnsPerHost:     2000,
-				IdleConnTimeout:     3 * time.Second,
-				DisableKeepAlives:   true,
-				TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+				IdleConnTimeout: 1 * time.Hour,
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			}
-			
+
 			// Configure proxy error handler to track drops
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
 				log.Printf("Proxy error to %s: %v", targetURL.String(), e)
@@ -149,16 +219,16 @@ func loadConfig(path string) error {
 				jsonErr := fmt.Sprintf(`{"error":{"message":"Upstream vLLM node %s failed: %v","type":"upstream_error","param":null,"code":"502"}}`, targetURL.String(), e)
 				w.Write([]byte(jsonErr))
 			}
-			
+
 			// Attach the stream filter interceptor for <think> tag removal
 			proxy.ModifyResponse = streamFilterInterceptor
-			
+
 			b.Proxy = proxy
-			
+
 			// Asynchronously cache the backend's true Model ID for transparent rewriting
 			go func(b *Backend) {
 				client := &http.Client{
-					Timeout: 5 * time.Second,
+					Timeout:   5 * time.Second,
 					Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 				}
 				resp, err := client.Get(fmt.Sprintf("%s/v1/models", b.URL.String()))
@@ -213,8 +283,8 @@ type captureResponseWriter struct {
 	header     http.Header
 }
 
-func (w *captureResponseWriter) Header() http.Header { return w.header }
-func (w *captureResponseWriter) WriteHeader(statusCode int) { w.statusCode = statusCode }
+func (w *captureResponseWriter) Header() http.Header         { return w.header }
+func (w *captureResponseWriter) WriteHeader(statusCode int)  { w.statusCode = statusCode }
 func (w *captureResponseWriter) Write(b []byte) (int, error) { return w.body.Write(b) }
 
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
@@ -259,10 +329,10 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
 			// Often LiteLLM clients prepend openai/ to the model name, e.g. openai/gpt-oss-120b
 			// vLLM doesn't usually care about provider prefixes, or it registers the exact string.
-			// The caller will send whatever model name it wants. 
+			// The caller will send whatever model name it wants.
 			requestedModel = reqBody.Model
 		}
-		
+
 		// Restore body for proxy
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		r.ContentLength = int64(len(bodyBytes))
@@ -397,14 +467,66 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Retry loop (max 10 retries)
-	maxRetries := 10
-	var lastErrResponse *http.Response
-	var lastErrBody []byte
-
 	metrics := getOrCreateMetrics(resolvedModelName)
 	atomic.AddInt64(&metrics.activeRequests, 1)
 	defer atomic.AddInt64(&metrics.activeRequests, -1)
+
+	// For streaming requests: pick best backend and pipe directly without buffering.
+	// Retry is not possible once headers are sent, so we skip the retry loop.
+	var isStreaming bool
+	if r.Method == http.MethodPost && len(bodyBytes) > 0 {
+		var reqBody struct {
+			Stream bool `json:"stream"`
+		}
+		json.Unmarshal(bodyBytes, &reqBody)
+		isStreaming = reqBody.Stream
+	}
+
+	if isStreaming {
+		routingMutex.Lock()
+		var bestBackend *Backend
+		var minReqs int32 = -1
+		for _, b := range backends {
+			reqs := atomic.LoadInt32(&b.ActiveRequests)
+			if minReqs == -1 || reqs < minReqs {
+				minReqs = reqs
+				bestBackend = b
+			}
+		}
+		if bestBackend == nil {
+			routingMutex.Unlock()
+			http.Error(w, `{"error":{"message":"No available backends"}}`, http.StatusServiceUnavailable)
+			return
+		}
+		atomic.AddInt32(&bestBackend.ActiveRequests, 1)
+		routingMutex.Unlock()
+		defer atomic.AddInt32(&bestBackend.ActiveRequests, -1)
+
+		body := bodyBytes
+		if bestBackend.CachedModelID != "" && bestBackend.CachedModelID != requestedModel {
+			var genericMap map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &genericMap); err == nil {
+				genericMap["model"] = bestBackend.CachedModelID
+				if newBody, err := json.Marshal(genericMap); err == nil {
+					body = newBody
+				}
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+		r.Header.Del("Origin")
+
+		log.Printf("[Routing-Stream] %s -> %s", requestedModel, bestBackend.URL.String())
+		bestBackend.Proxy.ServeHTTP(w, r)
+		atomic.AddInt64(&metrics.completedCount, 1)
+		return
+	}
+
+	// 4. Non-streaming: retry loop (max 10 retries)
+	maxRetries := 10
+	var lastErrResponse *http.Response
+	var lastErrBody []byte
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var bestBackend *Backend
@@ -466,7 +588,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Origin")
 
 		bestBackend.Proxy.ServeHTTP(rec, r)
-		
+
 		atomic.AddInt32(&bestBackend.ActiveRequests, -1)
 		log.Printf("[Completed] Route %s -> %s (Status: %d)", requestedModel, bestBackend.URL.String(), rec.statusCode)
 
@@ -481,9 +603,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 				Header:     rec.header,
 			}
 			lastErrBody = rec.body.Bytes()
-			
+
 			log.Printf("🚨 BACKEND %d FROM %s (Attempt %d) 🚨", rec.statusCode, bestBackend.URL.Host, attempt+1)
-			
+
 			// If we have more retries, continue the loop
 			if attempt < maxRetries {
 				continue
