@@ -1,0 +1,627 @@
+{% extends "base.html" %}
+
+{% block extra_styles %}
+.section-h {
+    font-size: 1.05rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em;
+    color: #374151; margin: 1.8rem 0 .75rem;
+    display: flex; align-items: center; gap: .65rem; flex-wrap: wrap;
+    padding: .65rem 1rem; border-radius: 10px;
+    border-left: 5px solid transparent;
+}
+.section-h .badge { font-weight: 600; letter-spacing: 0; text-transform: none; font-size: .72rem; }
+.section-h.live       { background: #ecfdf5; border-left-color: #10b981; color: #065f46; }
+.section-h.window     { background: #eff6ff; border-left-color: #3b82f6; color: #1e3a8a; }
+.section-h.cumulative { background: #f5f3ff; border-left-color: #8b5cf6; color: #4c1d95; }
+.section-h .pill-row .pill { font-size: .78rem; }
+.section-h .pill-row .pill.active { background: #1e3a8a; border-color: #1e3a8a; }
+.section-h .sublabel { font-size: .78rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: inherit; opacity: .8; }
+
+.metric-card { border-radius: 12px; }
+.metric-card .val { font-size: 1.7rem; font-weight: 700; line-height: 1.05; }
+.metric-card .lbl { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin-top: .25rem; }
+.metric-card .hint { font-size: .68rem; color: #9ca3af; margin-top: .15rem; }
+
+.chart-wrap { position: relative; height: 280px; }
+.chart-wrap-tall { position: relative; height: 360px; }
+.chart-wrap-bars { position: relative; height: var(--bar-chart-h, 280px); min-height: 240px; }
+
+.cb-closed   { color: #059669; }
+.cb-open     { color: #dc2626; }
+.cb-half     { color: #d97706; }
+.cb-unknown  { color: #9ca3af; }
+
+#refresh-badge { font-size: .72rem; }
+
+.pill-row { display: flex; gap: .35rem; flex-wrap: wrap; }
+.pill {
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #374151;
+    padding: .3rem .85rem;
+    border-radius: 999px;
+    font-size: .8rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .12s, border-color .12s, color .12s;
+}
+.pill:hover { border-color: #3b82f6; color: #1d4ed8; }
+.pill.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+.pill .count { font-size: .68rem; opacity: .85; margin-left: .25rem; }
+
+.live-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #22c55e; margin-right: 6px;
+    animation: livepulse 1.6s ease-in-out infinite;
+}
+@keyframes livepulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .45; transform: scale(.85); }
+}
+{% endblock %}
+
+{% block content %}
+<div class="d-flex align-items-center mb-3 gap-3 flex-wrap">
+    <h5 class="mb-0 fw-bold"><i class="fa-solid fa-chart-line me-2 text-primary"></i>Router Metrics</h5>
+    <span id="refresh-badge" class="badge bg-secondary">loading…</span>
+    <span id="error-msg" class="text-danger small d-none"></span>
+</div>
+
+<!-- Deployment tabs -->
+<div class="pill-row mb-3" id="dep-tabs">
+    <button class="pill active" data-dep="__all__">All</button>
+</div>
+
+<!-- ── LIVE section ────────────────────────────────────────────────────── -->
+<div class="section-h live">
+    <span class="live-dot"></span><span>Live</span>
+    <span class="badge bg-light text-muted border">real-time · refreshed every 2 s</span>
+</div>
+<div class="row g-3 mb-3">
+    <div class="col-12 col-md-4">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-success" id="c-active">—</div>
+            <div class="lbl">Active workers</div>
+            <div class="hint">in selected group</div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-primary" id="c-inflight">—</div>
+            <div class="lbl">In-flight requests</div>
+            <div class="hint">currently being served</div>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-info" id="c-rps-live">—</div>
+            <div class="lbl">Requests / second</div>
+            <div class="hint">last 5 s</div>
+        </div>
+    </div>
+</div>
+<div class="row g-3 mb-1">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><span class="live-dot"></span>In-flight per worker</div>
+            <div class="card-body">
+                <div class="chart-wrap-bars" id="inflight-chart-wrap"><canvas id="inflight-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── ROLLING WINDOW section (time selector is part of the header) ───── -->
+<div class="section-h window">
+    <i class="fa-solid fa-clock-rotate-left"></i>
+    <span>Rolling window</span>
+    <span class="sublabel ms-2">·</span>
+    <span class="sublabel">applies to all charts below</span>
+    <div class="pill-row ms-auto" id="window-pills">
+        <button class="pill" data-win="900">15 min</button>
+        <button class="pill active" data-win="3600">1 hour</button>
+        <button class="pill" data-win="21600">6 hours</button>
+        <button class="pill" data-win="43200">12 hours</button>
+        <button class="pill" data-win="86400">24 hours</button>
+    </div>
+</div>
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-primary" id="c-rps">—</div>
+            <div class="lbl">Requests / second</div>
+            <div class="hint" id="c-rps-hint">avg over window</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val" id="c-processed">—</div>
+            <div class="lbl">Total requests</div>
+            <div class="hint" id="c-processed-hint">in window</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-warning" id="c-latency">—</div>
+            <div class="lbl">Avg latency</div>
+            <div class="hint">per successful request</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-danger" id="c-retries">—</div>
+            <div class="lbl">Retry rate</div>
+            <div class="hint" id="c-retries-hint">retries / requests</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-wave-square me-1 text-primary"></i>Requests / sec over time</span>
+                <span class="small text-muted" id="rps-window-label">last 1 hour</span>
+            </div>
+            <div class="card-body">
+                <div class="chart-wrap-tall"><canvas id="rps-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-12 col-lg-7">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Per-worker requests</span>
+                <span class="small text-muted" id="perworker-window-label">in window</span>
+            </div>
+            <div class="card-body">
+                <div class="chart-wrap-bars" id="worker-chart-wrap"><canvas id="worker-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-5">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Latency distribution</span>
+                <span class="small text-muted" id="latency-window-label">in window</span>
+            </div>
+            <div class="card-body">
+                <div class="chart-wrap"><canvas id="latency-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── CUMULATIVE section ─────────────────────────────────────────────── -->
+<div class="section-h cumulative">
+    <i class="fa-solid fa-infinity"></i><span>Cumulative</span>
+    <span class="badge bg-light text-muted border">since router start</span>
+</div>
+<div class="row g-3 mb-3">
+    <div class="col-12">
+        <div class="text-muted small mb-1"><i class="fa-solid fa-shield-halved me-1"></i>Circuit breakers</div>
+    </div>
+</div>
+<div class="row g-3 mb-3">
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header">States and outcomes per worker</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0" id="cb-table">
+                    <thead class="table-light"><tr>
+                        <th>Worker</th><th>State</th><th class="text-end">Success</th><th class="text-end">Failure</th>
+                    </tr></thead>
+                    <tbody id="cb-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-6">
+        <div class="card h-100">
+            <div class="card-header">Success vs failure per worker</div>
+            <div class="card-body">
+                <div class="chart-wrap-bars" id="cb-outcomes-wrap"><canvas id="cb-outcomes-chart"></canvas></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-2">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">CB state transitions</div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light"><tr>
+                        <th>Worker</th><th>From</th><th>To</th><th class="text-end">Count</th>
+                    </tr></thead>
+                    <tbody id="cb-trans-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+const PALETTE = [
+    '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
+    '#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6',
+    '#6366f1','#a78bfa','#22d3ee','#fde047','#fb7185',
+    '#34d399','#a3e635','#facc15','#60a5fa','#f472b6'
+];
+const ALL_TAB = '__all__';
+const TAB_STORAGE_KEY = 'metrics_selected_tab_v3';
+const WIN_STORAGE_KEY = 'metrics_selected_window_v2';
+const ALLOWED_WINDOWS = [900, 3600, 21600, 43200, 86400];
+const POLL_INTERVAL_MS = 2000;
+const HISTORY_INTERVAL_MS = 5000;
+
+let selectedDep = localStorage.getItem(TAB_STORAGE_KEY) || ALL_TAB;
+let selectedWindow = parseInt(localStorage.getItem(WIN_STORAGE_KEY) || '3600', 10);
+if (!ALLOWED_WINDOWS.includes(selectedWindow)) selectedWindow = 3600;
+let lastData = null;
+
+const WINDOW_LABELS = { 900: 'last 15 min', 3600: 'last 1 hour', 21600: 'last 6 hours', 43200: 'last 12 hours', 86400: 'last 24 hours' };
+function windowLabel(s) { return WINDOW_LABELS[s] || `last ${s}s`; }
+
+function shortWorker(w) {
+    if (typeof w === 'object' && w !== null) return w.name || w.url;
+    return w;
+}
+function fmtInt(n) {
+    if (n === null || n === undefined) return '—';
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
+    return Math.round(n).toString();
+}
+function fmtRate(n) {
+    if (n === null || n === undefined) return '—';
+    if (n >= 100) return Math.round(n).toString();
+    if (n >= 10)  return n.toFixed(1);
+    return n.toFixed(2);
+}
+function cbStateLabel(s) {
+    if (s === 0) return '<span class="cb-closed fw-bold"><i class="fa-solid fa-circle-check me-1"></i>Closed</span>';
+    if (s === 1) return '<span class="cb-open fw-bold"><i class="fa-solid fa-circle-xmark me-1"></i>Open</span>';
+    if (s === 2) return '<span class="cb-half fw-bold"><i class="fa-solid fa-circle-half-stroke me-1"></i>Half-open</span>';
+    return '<span class="cb-unknown">—</span>';
+}
+// Tabs group workers by served_model_name (the actual model served, which can
+// differ even when the deployment Config name is the same e.g. gpt-oss-120b vs
+// gpt-oss-120b-low). selectedDep stores the served_model_name.
+function filterWorkers(workers) {
+    if (selectedDep === ALL_TAB) return workers;
+    return workers.filter(w => w.served_model_name === selectedDep);
+}
+
+// ── Charts ───────────────────────────────────────────────────────────────
+const rpsCtx = document.getElementById('rps-chart').getContext('2d');
+const rpsChart = new Chart(rpsCtx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+        label: 'RPS', data: [],
+        borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.12)',
+        fill: true, tension: 0.35, pointRadius: 1,
+    }]},
+    options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { ticks: { maxTicksLimit: 12, font: { size: 11 } } },
+            y: { beginAtZero: true, ticks: { font: { size: 11 } } }
+        }
+    }
+});
+
+const wCtx = document.getElementById('worker-chart').getContext('2d');
+const workerChart = new Chart(wCtx, {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'Requests in window', data: [], backgroundColor: PALETTE }] },
+    options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { beginAtZero: true, ticks: { font: { size: 11 } } },
+            y: { ticks: { font: { size: 11 }, autoSkip: false } }
+        }
+    }
+});
+
+const ifCtx = document.getElementById('inflight-chart').getContext('2d');
+const inflightChart = new Chart(ifCtx, {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'In-flight (now)', data: [], backgroundColor: PALETTE }] },
+    options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { beginAtZero: true, ticks: { font: { size: 11 } } },
+            y: { ticks: { font: { size: 11 }, autoSkip: false } }
+        }
+    }
+});
+
+const latCtx = document.getElementById('latency-chart').getContext('2d');
+const latencyChart = new Chart(latCtx, {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'Requests', data: [], backgroundColor: '#6366f1' }] },
+    options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { title: { display: true, text: 'Latency bucket (s)', font: { size: 11 } }, ticks: { font: { size: 10 } } },
+            y: { beginAtZero: true, title: { display: true, text: 'Requests', font: { size: 11 } }, ticks: { font: { size: 11 } } }
+        }
+    }
+});
+
+const cbCtx = document.getElementById('cb-outcomes-chart').getContext('2d');
+const cbOutcomesChart = new Chart(cbCtx, {
+    type: 'bar',
+    data: { labels: [], datasets: [
+        { label: 'Success', data: [], backgroundColor: '#10b981' },
+        { label: 'Failure', data: [], backgroundColor: '#ef4444' },
+    ]},
+    options: {
+        animation: false, responsive: true, maintainAspectRatio: false,
+        indexAxis: 'y',
+        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+        scales: {
+            x: { stacked: true, beginAtZero: true, ticks: { font: { size: 11 } } },
+            y: { stacked: true, ticks: { font: { size: 11 }, autoSkip: false } }
+        }
+    }
+});
+
+// ── Live 5-second RPS computed client-side from cumulative processed ─────
+let _liveBuffer = {};   // depKey -> [{ ts_ms, total }, ...]
+function computeLive5sRps(nowMs, totalProcessed) {
+    const key = selectedDep;
+    const buf = _liveBuffer[key] = (_liveBuffer[key] || []);
+    buf.push({ ts_ms: nowMs, total: totalProcessed });
+    const drop_before = nowMs - 10_000;
+    while (buf.length > 1 && buf[0].ts_ms < drop_before) buf.shift();
+    const target_old = nowMs - 5000;
+    let anchor = buf[0];
+    for (const s of buf) {
+        if (s.ts_ms <= target_old) anchor = s;
+        else break;
+    }
+    const dt = (nowMs - anchor.ts_ms) / 1000;
+    if (dt < 1) return null;
+    const delta = Math.max(0, totalProcessed - anchor.total);
+    return delta / dt;
+}
+
+// ── RPS chart label formatting based on window ──────────────────────────
+function rpsLabel(ts) {
+    const t = new Date(ts * 1000);
+    if (selectedWindow >= 43200) {
+        const mm = String(t.getMonth() + 1).padStart(2, '0');
+        const dd = String(t.getDate()).padStart(2, '0');
+        const hh = String(t.getHours()).padStart(2, '0');
+        const mi = String(t.getMinutes()).padStart(2, '0');
+        return `${mm}/${dd} ${hh}:${mi}`;
+    }
+    if (selectedWindow >= 3600) {
+        return String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+    }
+    return String(t.getHours()).padStart(2, '0') + ':' +
+           String(t.getMinutes()).padStart(2, '0') + ':' +
+           String(t.getSeconds()).padStart(2, '0');
+}
+
+async function refreshRpsHistory() {
+    const params = new URLSearchParams({ window: String(selectedWindow) });
+    if (selectedDep !== ALL_TAB) params.set('served_model_name', selectedDep);
+    try {
+        const r = await fetch('/api/rps_history?' + params.toString());
+        const d = await r.json();
+        const samples = d.samples || [];
+        rpsChart.data.labels = samples.map(s => rpsLabel(s.ts));
+        rpsChart.data.datasets[0].data = samples.map(s => s.rps);
+        rpsChart.update('none');
+    } catch (e) { /* keep chart on transient fetch failure */ }
+}
+
+// ── Tab + window pills ───────────────────────────────────────────────────
+function renderTabs(d) {
+    const container = document.getElementById('dep-tabs');
+    const counts = {};
+    (d.per_worker || []).forEach(w => {
+        if (!w.served_model_name) return;
+        counts[w.served_model_name] = (counts[w.served_model_name] || 0) + 1;
+    });
+    const names = Object.keys(counts).sort();
+    const html = [`<button class="pill ${selectedDep === ALL_TAB ? 'active' : ''}" data-dep="${ALL_TAB}">All<span class="count">${(d.per_worker || []).length}</span></button>`];
+    for (const name of names) {
+        const safe = String(name).replace(/"/g, '&quot;');
+        html.push(`<button class="pill ${selectedDep === name ? 'active' : ''}" data-dep="${safe}">${safe}<span class="count">${counts[name]}</span></button>`);
+    }
+    container.innerHTML = html.join('');
+    container.querySelectorAll('.pill').forEach(el => {
+        el.addEventListener('click', () => {
+            const dep = el.getAttribute('data-dep');
+            if (dep === selectedDep) return;
+            selectedDep = dep;
+            try { localStorage.setItem(TAB_STORAGE_KEY, selectedDep); } catch {}
+            refreshRpsHistory();
+            // Deployment changes the filter for BOTH live and window sections,
+            // so re-render both from the cached lastData immediately.
+            if (lastData) { renderLive(lastData); renderWindow(lastData); }
+            container.querySelectorAll('.pill').forEach(p => p.classList.toggle('active', p.getAttribute('data-dep') === selectedDep));
+        });
+    });
+}
+
+document.querySelectorAll('#window-pills .pill').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.win, 10) === selectedWindow);
+    el.addEventListener('click', () => {
+        const win = parseInt(el.dataset.win, 10);
+        if (win === selectedWindow) return;
+        selectedWindow = win;
+        try { localStorage.setItem(WIN_STORAGE_KEY, String(win)); } catch {}
+        document.querySelectorAll('#window-pills .pill').forEach(p =>
+            p.classList.toggle('active', parseInt(p.dataset.win, 10) === selectedWindow));
+        // Refresh ONLY the rolling-window section. Live values are intentionally untouched
+        // so they don't appear to "change because of" the window pill.
+        fetchData(false);
+        refreshRpsHistory();
+    });
+});
+
+// ── Render: split into Live and Window so window-pill clicks
+//   only touch the window section. Live keeps polling on its own cadence.
+
+function renderLive(d) {
+    const workers = filterWorkers(d.per_worker || []);
+
+    // LIVE cards
+    document.getElementById('c-active').textContent = workers.length;
+    const inflight = workers.reduce((s, w) => s + (w.running || 0), 0);
+    document.getElementById('c-inflight').textContent = fmtInt(inflight);
+    const sumProcessed = workers.reduce((s, w) => s + (w.processed || 0), 0);
+    const nowMs = (d.timestamp || (Date.now()/1000)) * 1000;
+    const rps5s = computeLive5sRps(nowMs, sumProcessed);
+    document.getElementById('c-rps-live').textContent = fmtRate(rps5s);
+
+    // In-flight per worker chart (live gauge value)
+    const labels = workers.map(w => shortWorker(w));
+    const barHeight = Math.max(240, labels.length * 26 + 60);
+    const barColors = workers.map((_, i) => PALETTE[i % PALETTE.length]);
+    document.getElementById('inflight-chart-wrap').style.setProperty('--bar-chart-h', barHeight + 'px');
+    inflightChart.data.labels = labels;
+    inflightChart.data.datasets[0].data = workers.map(w => w.running || 0);
+    inflightChart.data.datasets[0].backgroundColor = barColors;
+    inflightChart.resize();
+    inflightChart.update('none');
+}
+
+function renderWindow(d) {
+    const workers = filterWorkers(d.per_worker || []);
+    const isAll = selectedDep === ALL_TAB;
+    const winLbl = windowLabel(d.window_seconds);
+
+    const elWinLabel = document.getElementById('win-label');
+    if (elWinLabel) elWinLabel.textContent = winLbl;
+    document.getElementById('rps-window-label').textContent = winLbl;
+    document.getElementById('perworker-window-label').textContent = winLbl;
+    document.getElementById('c-rps-hint').textContent = 'avg over ' + winLbl;
+    document.getElementById('c-processed-hint').textContent = 'in ' + winLbl;
+    document.getElementById('c-retries-hint').textContent = winLbl;
+
+    let rpsWin, processedWin, retryPct, avgLat;
+    if (isAll) {
+        rpsWin       = d.rps_window;
+        processedWin = d.requests_window;
+        retryPct     = d.retry_rate_window_pct;
+        avgLat       = d.avg_latency_window_s;
+    } else {
+        processedWin = workers.reduce((s, w) => s + (w.processed_window || 0), 0);
+        rpsWin       = d.window_seconds ? processedWin / d.window_seconds : null;
+        retryPct = d.retry_rate_window_pct;
+        avgLat   = d.avg_latency_window_s;
+    }
+    document.getElementById('c-rps').textContent       = fmtRate(rpsWin);
+    document.getElementById('c-processed').textContent = fmtInt(processedWin);
+    document.getElementById('c-latency').textContent   = (avgLat || 0).toFixed(2) + ' s';
+    document.getElementById('c-retries').textContent   = (retryPct || 0).toFixed(2) + ' %';
+
+    // Per-worker bar (windowed)
+    const labels = workers.map(w => shortWorker(w));
+    const barHeight = Math.max(240, labels.length * 26 + 60);
+    const barColors = workers.map((_, i) => PALETTE[i % PALETTE.length]);
+    document.getElementById('worker-chart-wrap').style.setProperty('--bar-chart-h', barHeight + 'px');
+    workerChart.data.labels = labels;
+    workerChart.data.datasets[0].data = workers.map(w => w.processed_window || 0);
+    workerChart.data.datasets[0].backgroundColor = barColors;
+    workerChart.resize();
+    workerChart.update('none');
+
+    // Latency histogram (windowed — driven by the rolling-window selector)
+    const elLat = document.getElementById('latency-window-label');
+    if (elLat) elLat.textContent = winLbl;
+    const histSrc = d.latency_histogram_window || d.latency_histogram || [];
+    const nonZero = histSrc.filter(b => b.count > 0);
+    latencyChart.data.labels = nonZero.map(b => b.le + 's');
+    latencyChart.data.datasets[0].data = nonZero.map(b => b.count);
+    latencyChart.update('none');
+
+    // CB table
+    const cbTbody = document.getElementById('cb-tbody');
+    cbTbody.innerHTML = workers.map(w => `
+        <tr>
+            <td class="small text-monospace">${shortWorker(w)}</td>
+            <td>${cbStateLabel(w.cb_state)}</td>
+            <td class="text-end text-success">${fmtInt(w.cb_success)}</td>
+            <td class="text-end text-danger">${w.cb_failure > 0 ? '<b>' + fmtInt(w.cb_failure) + '</b>' : '0'}</td>
+        </tr>`).join('') || '<tr><td colspan="4" class="text-muted text-center small py-3">No workers in this group</td></tr>';
+
+    // CB outcomes stacked bar
+    const cbWorkers = workers.filter(w => w.cb_success > 0 || w.cb_failure > 0);
+    const cbHeight = Math.max(240, cbWorkers.length * 26 + 60);
+    document.getElementById('cb-outcomes-wrap').style.setProperty('--bar-chart-h', cbHeight + 'px');
+    cbOutcomesChart.data.labels = cbWorkers.map(w => shortWorker(w));
+    cbOutcomesChart.data.datasets[0].data = cbWorkers.map(w => w.cb_success);
+    cbOutcomesChart.data.datasets[1].data = cbWorkers.map(w => w.cb_failure);
+    cbOutcomesChart.resize();
+    cbOutcomesChart.update('none');
+
+    // CB transitions
+    const transRows = (d.cb_transitions || []).filter(t => {
+        if (isAll) return true;
+        const found = (d.per_worker || []).find(w => w.url === t.worker);
+        return found && found.served_model_name === selectedDep;
+    });
+    const transTbody = document.getElementById('cb-trans-tbody');
+    transTbody.innerHTML = transRows.length === 0
+        ? '<tr><td colspan="4" class="text-muted text-center small py-2">No transitions recorded</td></tr>'
+        : transRows.map(t => `
+            <tr>
+                <td class="small">${t.name || t.worker}</td>
+                <td><span class="badge bg-secondary">${t.from_state}</span></td>
+                <td><span class="badge bg-secondary">${t.to_state}</span></td>
+                <td class="text-end">${t.count}</td>
+            </tr>`).join('');
+}
+
+async function fetchData(updateLive) {
+    try {
+        const r = await fetch(`/api/prometheus_stats?window=${selectedWindow}`);
+        const d = await r.json();
+        if (d.error) {
+            document.getElementById('error-msg').textContent = 'Error: ' + d.error;
+            document.getElementById('error-msg').classList.remove('d-none');
+            return;
+        }
+        document.getElementById('error-msg').classList.add('d-none');
+        lastData = d;
+        renderTabs(d);
+        renderWindow(d);
+        if (updateLive) renderLive(d);
+        const now = new Date();
+        document.getElementById('refresh-badge').textContent =
+            'Updated ' + now.getHours().toString().padStart(2,'0') + ':' +
+            now.getMinutes().toString().padStart(2,'0') + ':' +
+            now.getSeconds().toString().padStart(2,'0');
+        document.getElementById('refresh-badge').className = 'badge bg-success';
+    } catch(e) {
+        document.getElementById('refresh-badge').className = 'badge bg-danger';
+        document.getElementById('refresh-badge').textContent = 'fetch error';
+    }
+}
+
+// Initial load + regular polling: refresh BOTH Live and Window
+fetchData(true);
+setInterval(() => fetchData(true), POLL_INTERVAL_MS);
+
+refreshRpsHistory();
+setInterval(refreshRpsHistory, HISTORY_INTERVAL_MS);
+</script>
+{% endblock %}

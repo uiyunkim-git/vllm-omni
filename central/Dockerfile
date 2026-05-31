@@ -16,5 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENTRYPOINT ["/bin/sh", "-c", "echo '127.0.0.1 vllm_omni_proxy' >> /etc/hosts && exec \"$@\"", "--"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

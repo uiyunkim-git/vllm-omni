@@ -5,7 +5,6 @@ import subprocess
 import httpx
 import logging
 import asyncio
-from jinja2 import Environment, FileSystemLoader
 from typing import List, Dict, Optional
 import db
 
@@ -14,9 +13,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
+P2C_ROUTER_URL = "http://143.248.74.105:11434"
+
 class CentralManager:
     def __init__(self):
-        self.env = Environment(loader=FileSystemLoader('/app/templates'))
         self._dep_lock = asyncio.Lock()
         db.init_db()
 
@@ -52,10 +52,7 @@ class CentralManager:
         conn.commit()
         conn.close()
         
-        if rows_affected > 0:
-            self.reload_go_proxy(self.load_deployments())
-            return True
-        return False
+        return rows_affected > 0
 
     def delete_worker(self, worker_id: str):
         conn = db.get_db()
@@ -64,10 +61,7 @@ class CentralManager:
         rows_affected = cursor.rowcount
         conn.commit()
         conn.close()
-        if rows_affected > 0:
-            self.reload_go_proxy(self.load_deployments())
-            return True
-        return False
+        return rows_affected > 0
 
     def get_workers(self):
         conn = db.get_db()
@@ -311,8 +305,6 @@ class CentralManager:
         
         existing_deps.append(dep)
         self.save_deployments(existing_deps)
-
-        self.reload_go_proxy(existing_deps)
         return dep
 
     async def stop_deployment(self, deploy_id: str):
@@ -347,7 +339,8 @@ class CentralManager:
                     except Exception as e:
                         logger.error(f"Failed to stop deployment {deploy_id} on worker {wid}: {e}")
 
-        self.reload_go_proxy(deps)
+        for node in dep.get("nodes", []):
+            await self._p2c_deregister(node["host"], node["port"])
         return True
 
     async def stop_replica(self, deploy_id: str, global_gpu_id: str):
@@ -371,8 +364,13 @@ class CentralManager:
 
             self.save_deployments(deps)
 
-        # Worker call outside the lock — can be slow and doesn't touch shared state
-        wid, _ = global_gpu_id.rsplit("-", 1)
+        # Find the node for this GPU before making the worker call
+        wid, gpu_idx = global_gpu_id.rsplit("-", 1)
+        removed_node = next(
+            (n for n in dep.get("nodes", []) if n.get("name", "").endswith(f"_{gpu_idx}")),
+            None,
+        )
+
         all_workers = self.get_workers()
         if wid in all_workers:
             worker = all_workers[wid]
@@ -383,7 +381,8 @@ class CentralManager:
                 except Exception as e:
                     logger.error(f"Failed to stop replica {global_gpu_id} of {deploy_id}: {e}")
 
-        self.reload_go_proxy(deps)
+        if removed_node:
+            await self._p2c_deregister(removed_node["host"], removed_node["port"])
         return True
 
     async def stream_logs(self, deploy_id: str, container_name: Optional[str] = None):
@@ -456,45 +455,73 @@ class CentralManager:
             for task in tasks:
                 task.cancel()
 
-    def reload_go_proxy(self, deps):
-        import os
-        import json
-        import subprocess
+    async def _p2c_register(self, host: str, port: int):
+        url = f"https://{host}:{port + 40000}"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(f"{P2C_ROUTER_URL}/add_worker", params={"url": url}, timeout=30.0)
+            if resp.status_code == 200:
+                logger.info(f"P2C: registered {url}")
+            elif "already exists" in resp.text:
+                logger.debug(f"P2C: {url} already registered")
+            else:
+                logger.warning(f"P2C: unexpected response for {url}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.warning(f"P2C: failed to register {url}: {e}")
 
-        models_map = {}
-        for d in deps:
-            if d.get("status") == "running" and d.get("deployment_type") != "embeddings": # Only active running
-                model_name = d.get("served_model_name") or d.get("model", "default_model")
-                if model_name not in models_map:
-                    models_map[model_name] = []
-                healthy_nodes = [n for n in d.get("nodes", []) if n.get("is_healthy")]
-                # If all nodes are temporarily unhealthy, keep all of them rather than
-                # emptying the backend list (which causes request rejection storms)
-                source_nodes = healthy_nodes if healthy_nodes else d.get("nodes", [])
-                seen = set()
-                for node in source_nodes:
-                    key = (node["host"], node["port"])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    models_map[model_name].append({
-                        "host": node["host"],
-                        "port": node["port"] + 40000
-                    })
-        
-        config_data = {
-            "auth_token": os.environ.get("VLLM_API_KEY", "bislaprom3#"),
-            "models": models_map
-        }
-        
-        # Ensure config directory exists
-        os.makedirs("/app/go_proxy_config", exist_ok=True)
-        
-        with open("/app/go_proxy_config/config.json", "w") as f:
-            json.dump(config_data, f, indent=4)
-            
-        # Hot reload without dropping connections
-        subprocess.run(["curl", "-X", "POST", "http://vllm_omni_proxy:4000/reload"], check=False)
+    async def _p2c_deregister(self, host: str, port: int):
+        url = f"https://{host}:{port + 40000}"
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(f"{P2C_ROUTER_URL}/remove_worker", params={"url": url}, timeout=10.0)
+            logger.info(f"P2C: deregistered {url}")
+        except Exception as e:
+            logger.warning(f"P2C: failed to deregister {url}: {e}")
+
+    async def sync_p2c_workers(self):
+        """Register all currently healthy deployment nodes with the P2C router."""
+        deps = self.load_deployments()
+        for dep in deps:
+            for node in dep.get("nodes", []):
+                if node.get("is_healthy"):
+                    await self._p2c_register(node["host"], node["port"])
+
+    async def _check_node_ready(self, client, host: int, api_port: int, dep: dict) -> bool:
+        """Liveness + readiness check.
+
+        /health alone is insufficient for vLLM: the HTTP server returns 200 while
+        the engine is still loading model weights, which leads to a thundering-herd
+        of failed requests (and CB trips) the moment the router starts routing.
+        We additionally require /v1/models to list the served model, which only
+        happens after the engine finishes initialization.
+        """
+        engine = dep.get("engine", "vllm")
+        health_path = "/health" if engine == "vllm" else "/"
+
+        try:
+            resp = await client.get(f"https://{host}:{api_port}{health_path}", timeout=8.0)
+            if resp.status_code != 200:
+                return False
+        except Exception:
+            return False
+
+        if engine != "vllm":
+            return True
+
+        served_name = dep.get("served_model_name") or dep.get("model", "")
+        try:
+            resp = await client.get(f"https://{host}:{api_port}/v1/models", timeout=8.0)
+            if resp.status_code != 200:
+                return False
+            data = resp.json().get("data", [])
+            if not data:
+                return False
+            if served_name and not any(m.get("id") == served_name for m in data):
+                return False
+        except Exception:
+            return False
+
+        return True
 
     async def run_health_checks(self):
         deps = self.load_deployments()
@@ -515,13 +542,9 @@ class CentralManager:
                     endpoint_key = (host, api_port)
 
                     if endpoint_key not in checked_endpoints:
-                        health_path = "/health" if dep.get("engine", "vllm") == "vllm" else "/"
-                        health_url = f"https://{host}:{api_port}{health_path}"
-                        try:
-                            resp = await client.get(health_url, timeout=8.0)
-                            checked_endpoints[endpoint_key] = resp.status_code == 200
-                        except Exception:
-                            checked_endpoints[endpoint_key] = False
+                        checked_endpoints[endpoint_key] = await self._check_node_ready(
+                            client, host, api_port, dep
+                        )
 
                     is_healthy = checked_endpoints[endpoint_key]
 
@@ -534,10 +557,12 @@ class CentralManager:
                             node["is_healthy"] = False
                             node["_fail_count"] = 0
                             changed = True
+                            await self._p2c_deregister(host, node["port"])
                     elif is_healthy:
                         if not node.get("is_healthy"):
                             node["is_healthy"] = True
                             changed = True
+                            await self._p2c_register(host, node["port"])
                         node["_fail_count"] = 0
 
                     if not node.get("is_healthy"):
@@ -549,4 +574,3 @@ class CentralManager:
 
         if changed:
             self.save_deployments(deps)
-        self.reload_go_proxy(deps)

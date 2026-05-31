@@ -21,24 +21,74 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
+    # Wrap default entrypoint to add a MASQUERADE rule on the tailscale interface
+    # once it's up, so containers using this container as a gateway for the
+    # tailnet subnet (100.64.0.0/10) get their return traffic NAT'd correctly.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        (
+          for i in $$(seq 1 60); do
+            if ip link show tailscale0 >/dev/null 2>&1; then
+              iptables -t nat -C POSTROUTING -o tailscale0 -j MASQUERADE 2>/dev/null \
+                || iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+              echo "tailscale0 MASQUERADE rule installed"
+              break
+            fi
+            sleep 1
+          done
+        ) &
+        exec /usr/local/bin/containerboot
     ports:
-      - "${PROXY_PORT:-11434}:4000"
       - "8080:8080"
     networks:
       vllm_network:
         aliases:
-          - vllm_omni_proxy
+          - tailscale
 
-  vllm_router:
+  vllm_router_p2c:
     build:
-      context: ./central/go_proxy
-    container_name: vllm_omni_proxy
+      context: ./central/router
+      dockerfile: Dockerfile.router
+    container_name: vllm_omni_router_p2c
     restart: unless-stopped
-    network_mode: "service:tailscale"
     depends_on:
       - tailscale
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "11434:8080"
+      - "29000:29000"
+    environment:
+      - ROUTER_STATE_FILE=/var/lib/vllm-router/workers.json
+      - TAILSCALE_GATEWAY_HOST=tailscale
+      - TAILSCALE_SUBNET=100.64.0.0/10
     volumes:
-      - ./central/go_proxy/config.json:/app/config.json
+      - router-state:/var/lib/vllm-router
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        GW=$$(getent hosts $${TAILSCALE_GATEWAY_HOST} | awk '{print $$1}')
+        if [ -n "$$GW" ]; then
+          echo "Adding route $${TAILSCALE_SUBNET} via $$GW (tailscale gateway)"
+          ip route replace $${TAILSCALE_SUBNET} via $$GW || echo "route add failed (non-fatal)"
+        else
+          echo "WARN: tailscale host not resolvable, skipping route setup"
+        fi
+        exec "$$@"
+      - "--"
+    command: >
+      vllm-router
+      --host 0.0.0.0
+      --port 8080
+      --prometheus-host 0.0.0.0
+      --prometheus-port 29000
+      --policy power_of_two
+      --max-concurrent-requests 32768
+    networks:
+      vllm_network:
 
   central:
     build:
@@ -53,14 +103,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./central/main.py:/app/main.py
       - ./central/manager.py:/app/manager.py
-      - ./central/go_proxy:/app/go_proxy_config
-      - ./central/templates:/app/templates
       - ./central/frontend/static:/app/frontend/static
       - ./central/frontend:/app/frontend
       - ./central/data:/app/data
 
 volumes:
   tailscale-state:
+  router-state:
 
 networks:
   vllm_network:

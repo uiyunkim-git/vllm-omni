@@ -3,7 +3,6 @@ let gpus = [];
 let deployments = [];
 let savedConfigs = [];
 let endpoints = {};
-let proxyStats = {};
 let depGroupCollapsed = new Set();
 let gpuGroupCollapsed = new Set();
 const epImages = new Map();       // worker_id -> images[] cache
@@ -12,14 +11,10 @@ const epModels = new Map();       // worker_id -> models[] cache
 const modelDownloadInProgress = new Set();
 const _endpointActions = new Map();
 const _stopping = new Set(); // keys: dep id or "depId:gpu" for replicas
-let throughputChart = null;
-let selectedThroughputModel = null; // null = show all models
 
 document.addEventListener('DOMContentLoaded', () => {
     fetchStatus();
     setInterval(fetchStatus, 5000);
-    fetchProxyStats();
-    setInterval(fetchProxyStats, 2000);
 
     if (new URLSearchParams(window.location.search).get('deployed') === '1') {
         history.replaceState({}, '', '/');
@@ -31,16 +26,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (document.getElementById('deployEngine')?.value === 'vllm') fetchAllWorkerImages();
     });
 });
-
-async function fetchProxyStats() {
-    try {
-        const res = await fetch('/api/proxy_stats');
-        proxyStats = await res.json();
-        if (document.getElementById('model-stats-container')) renderModelStats();
-    } catch (err) {
-        // proxy may not be up yet, ignore
-    }
-}
 
 async function fetchStatus() {
     try {
@@ -59,7 +44,6 @@ async function fetchStatus() {
         if (document.getElementById('deployments-table-body')) renderDeployments();
         if (document.getElementById('saved-configs-container')) renderConfigs();
         if (document.getElementById('pending-endpoints-container')) renderEndpoints();
-        if (document.getElementById('haproxy-map-list')) renderHaproxyMap();
         if (document.getElementById('gateway-models-list')) renderGateway();
     } catch (err) {
         console.error("Failed to fetch status", err);
@@ -288,246 +272,7 @@ function escapeHtml(value) {
     }[ch]));
 }
 
-function getThroughputHistory(stats) {
-    if (Array.isArray(stats?.throughput_history)) return stats.throughput_history;
-    if (Array.isArray(stats?.history)) return stats.history;
-    return [];
-}
 
-function chartTimestampToMs(value) {
-    const numeric = Number(value) || 0;
-    return numeric > 100000000000 ? numeric : numeric * 1000;
-}
-
-function formatChartTime(value) {
-    return new Date(Number(value)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function renderModelStats() {
-    const container = document.getElementById('model-stats-container');
-    if (!container) return;
-
-    const readyModelNames = new Set(
-        deployments.flatMap(d => (d.nodes || []).some(n => n.is_healthy)
-            ? [d.served_model_name || d.model]
-            : []
-        )
-    );
-    const models = Object.keys(proxyStats).filter(m => readyModelNames.has(m)).sort((a, b) => a.localeCompare(b));
-    if (models.length === 0) {
-        if (throughputChart) { throughputChart.destroy(); throughputChart = null; }
-        selectedThroughputModel = null;
-        container.innerHTML = '<div class="col-12 text-muted small">No inference data yet.</div>';
-        return;
-    }
-
-    // Reset selection if the selected model is no longer in the list
-    if (selectedThroughputModel && !models.includes(selectedThroughputModel)) {
-        selectedThroughputModel = null;
-        if (throughputChart) { throughputChart.destroy(); throughputChart = null; }
-    }
-
-    if (!document.getElementById('model-stats-table-body') || !document.getElementById('throughput-chart')) {
-        if (throughputChart) { throughputChart.destroy(); throughputChart = null; }
-        container.innerHTML = `
-            <div class="col-12 col-xl-5 mb-3 mb-xl-0">
-                <div class="card table-card h-100" style="overflow:hidden">
-                    <div class="card-header d-flex justify-content-between align-items-center py-2">
-                        <span class="small fw-semibold text-muted">모델 목록</span>
-                        <button id="throughput-all-btn" onclick="selectThroughputModel(null)" class="btn btn-sm" style="font-size:.72rem;padding:.15rem .55rem">전체 보기</button>
-                    </div>
-                    <table class="table table-hover mb-0">
-                        <thead class="table-light">
-                            <tr>
-                                <th class="small text-muted fw-semibold">모델 (Served Name)</th>
-                                <th class="small text-muted fw-semibold text-center">추론 진행</th>
-                                <th class="small text-muted fw-semibold text-center">처리량<br><span class="fw-normal">30초 평균</span></th>
-                            </tr>
-                        </thead>
-                        <tbody id="model-stats-table-body"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="col-12 col-xl-7">
-                <div class="card throughput-chart-card h-100">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <span id="throughput-chart-title">처리량 추이</span>
-                        <span class="small text-muted">최근 15분 · 30초 평균</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="throughput-chart-wrap">
-                            <canvas id="throughput-chart"></canvas>
-                        </div>
-                    </div>
-                </div>
-            </div>`;
-    }
-
-    // Update "전체 보기" button style
-    const allBtn = document.getElementById('throughput-all-btn');
-    if (allBtn) {
-        if (selectedThroughputModel === null) {
-            allBtn.className = 'btn btn-sm btn-primary';
-        } else {
-            allBtn.className = 'btn btn-sm btn-outline-secondary';
-        }
-    }
-
-    // Update chart title
-    const chartTitle = document.getElementById('throughput-chart-title');
-    if (chartTitle) {
-        chartTitle.textContent = selectedThroughputModel ?? '처리량 추이';
-    }
-
-    const rows = models.map(name => {
-        const s = proxyStats[name] || {};
-        const active = s.active_requests || 0;
-        const avgRps = s.req_per_sec_avg_30s ?? s.req_per_sec ?? 0;
-        const safeName = escapeHtml(name);
-        const isSelected = selectedThroughputModel === name;
-        const rowStyle = isSelected
-            ? 'cursor:pointer;background:#eff6ff;border-left:3px solid #2563eb'
-            : 'cursor:pointer';
-        const activeBadge = active > 0
-            ? `<span class="badge stat-active">${active} 진행 중</span>`
-            : `<span class="badge stat-idle">대기</span>`;
-        const rpsBadge = `<span class="badge stat-rps">${formatRate(avgRps)} req/s</span>`;
-        return `
-            <tr style="${rowStyle}" data-model="${safeName}" onclick="selectThroughputModel(this.dataset.model)">
-                <td class="font-monospace fw-semibold small text-truncate" style="max-width:220px" title="${safeName}">${safeName}</td>
-                <td class="text-center">${activeBadge}</td>
-                <td class="text-center">${rpsBadge}</td>
-            </tr>`;
-    }).join('');
-
-    const tbody = document.getElementById('model-stats-table-body');
-    if (tbody) tbody.innerHTML = rows;
-
-    const chartModels = selectedThroughputModel ? [selectedThroughputModel] : models;
-    renderThroughputChart(chartModels);
-}
-
-window.selectThroughputModel = function(name) {
-    if (selectedThroughputModel === name) return;
-    selectedThroughputModel = name;
-    if (throughputChart) { throughputChart.destroy(); throughputChart = null; }
-    renderModelStats();
-};
-
-function renderThroughputChart(models) {
-    const canvas = document.getElementById('throughput-chart');
-    if (!canvas || typeof Chart === 'undefined') return;
-
-    const now = Date.now();
-    const historyWindowMs = 15 * 60 * 1000;
-    const colors = ['#2563eb', '#059669', '#dc2626', '#7c3aed', '#ea580c', '#0891b2', '#be123c', '#4d7c0f'];
-
-    const latestSampleAt = models.reduce((latest, name) => {
-        const history = getThroughputHistory(proxyStats[name] || {});
-        const last = history.length ? chartTimestampToMs(history[history.length - 1].ts ?? history[history.length - 1].timestamp) : 0;
-        return Math.max(latest, last || 0);
-    }, 0);
-    const xMax = Math.max(now, latestSampleAt) + 1000;
-    const xMin = xMax - historyWindowMs;
-
-    const datasets = models.map((name, idx) => {
-        const stats = proxyStats[name] || {};
-        const history = getThroughputHistory(stats);
-        let points = history.map(sample => ({
-            x: chartTimestampToMs(sample.ts ?? sample.timestamp),
-            y: Number(sample.req_per_sec_avg_30s ?? sample.req_per_sec ?? 0) || 0
-        })).filter(point => point.x >= xMin && point.x <= xMax);
-
-        points.sort((a, b) => a.x - b.x);
-
-        if (points.length === 0) {
-            points = [
-                { x: xMin, y: 0 },
-                { x: xMax, y: Number(stats.req_per_sec_avg_30s ?? stats.req_per_sec ?? 0) || 0 }
-            ];
-        } else if (points[0].x > xMin) {
-            const firstPoint = points[0];
-            const zeroBeforeFirst = Math.max(xMin, firstPoint.x - 1000);
-            points.unshift({ x: zeroBeforeFirst, y: 0 });
-            if (zeroBeforeFirst > xMin) points.unshift({ x: xMin, y: 0 });
-        }
-
-        const lastPoint = points[points.length - 1];
-        if (lastPoint.x < xMax) {
-            points.push({ x: xMax, y: lastPoint.y });
-        }
-
-        const color = colors[idx % colors.length];
-        const showPoints = points.length < 120;
-        return {
-            label: name,
-            data: points,
-            borderColor: color,
-            backgroundColor: color,
-            borderWidth: 2.5,
-            pointRadius: showPoints ? 2 : 0,
-            pointHoverRadius: 4,
-            pointHitRadius: 8,
-            tension: 0.25,
-            spanGaps: true
-        };
-    });
-
-    const chartData = { datasets };
-
-    if (throughputChart) {
-        throughputChart.data = chartData;
-        throughputChart.options.scales.x.min = xMin;
-        throughputChart.options.scales.x.max = xMax;
-        throughputChart.update('none');
-        return;
-    }
-
-    throughputChart = new Chart(canvas.getContext('2d'), {
-        type: 'line',
-        data: chartData,
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            parsing: false,
-            normalized: true,
-            interaction: { mode: 'nearest', intersect: false },
-            plugins: {
-                legend: {
-                    position: 'bottom',
-                    labels: { boxWidth: 10, usePointStyle: true }
-                },
-                tooltip: {
-                    callbacks: {
-                        title: items => items.length ? formatChartTime(items[0].parsed.x) : '',
-                        label: item => `${item.dataset.label}: ${formatRate(item.parsed.y)} req/s`
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    type: 'linear',
-                    min: xMin,
-                    max: xMax,
-                    grid: { color: '#eef2f7' },
-                    ticks: {
-                        maxTicksLimit: 6,
-                        callback: value => formatChartTime(value)
-                    }
-                },
-                y: {
-                    beginAtZero: true,
-                    grid: { color: '#eef2f7' },
-                    ticks: {
-                        precision: 0,
-                        callback: value => `${formatRate(value)} req/s`
-                    }
-                }
-            }
-        }
-    });
-}
 
 function renderDeployments() {
     const list = document.getElementById('deployments-table-body');
