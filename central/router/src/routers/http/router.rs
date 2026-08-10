@@ -87,6 +87,39 @@ fn load_persisted_workers() -> Vec<String> {
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 
+/// RAII guard for a worker's in-flight load counter. Increments on construction
+/// and decrements on drop — including the silent drop that happens when an
+/// async future is cancelled (client disconnect, retry timeout, etc.). Without
+/// this guard, a request that hits an `.await` and then gets cancelled would
+/// leak its increment and leave the worker's load gauge permanently inflated.
+struct LoadGuard {
+    registry: Arc<WorkerRegistry>,
+    worker_url: String,
+    armed: bool,
+}
+
+impl LoadGuard {
+    fn new(registry: Arc<WorkerRegistry>, worker_url: impl Into<String>) -> Self {
+        let worker_url = worker_url.into();
+        if let Some(w) = registry.get_by_url(&worker_url) {
+            w.increment_load();
+            RouterMetrics::set_running_requests(&worker_url, w.instance(), w.load());
+        }
+        Self { registry, worker_url, armed: true }
+    }
+}
+
+impl Drop for LoadGuard {
+    fn drop(&mut self) {
+        if !self.armed { return; }
+        self.armed = false;
+        if let Some(w) = self.registry.get_by_url(&self.worker_url) {
+            w.decrement_load();
+            RouterMetrics::set_running_requests(&self.worker_url, w.instance(), w.load());
+        }
+    }
+}
+
 /// Regular router that uses injected load balancing policies
 #[derive(Debug)]
 pub struct Router {
@@ -667,12 +700,14 @@ impl Router {
                 };
 
                 let policy_name = policy.name();
-                let load_incremented = if policy_name == "cache_aware" || policy_name == "power_of_two" {
-                    worker.increment_load();
-                    RouterMetrics::set_running_requests(worker.url(), worker.load());
-                    true
+                // RAII guard owns the increment/decrement. Pass ownership into
+                // send_typed_request so the decrement happens wherever the future
+                // ultimately ends — successful completion, error branch, or async
+                // cancellation when the client disconnects mid-await.
+                let load_guard = if matches!(policy_name, "cache_aware" | "power_of_two" | "least_connections") {
+                    Some(LoadGuard::new(Arc::clone(&self.worker_registry), worker.url()))
                 } else {
-                    false
+                    None
                 };
 
                 let response = self
@@ -682,7 +717,7 @@ impl Router {
                         route,
                         worker.url(),
                         is_stream,
-                        load_incremented,
+                        load_guard,
                     )
                     .await;
 
@@ -690,6 +725,26 @@ impl Router {
                 // should count against the circuit breaker.
                 let status = response.status();
                 worker.record_outcome(status.is_success() || status.is_client_error());
+
+                // Success-only metrics fire here (inside the closure) so we still have a
+                // reference to the worker that actually completed the request. That lets
+                // the latency histogram carry `worker` + `instance` labels — required for
+                // the per-deployment latency breakdown in Central's UI.
+                if status.is_success() {
+                    RouterMetrics::record_processed_request(worker.url(), worker.instance());
+                    RouterMetrics::record_request(route);
+                    RouterMetrics::record_generate_duration(worker.url(), worker.instance(), start.elapsed());
+                } else if is_retryable_status(status) {
+                    // Attribute the retry to the worker whose attempt just failed —
+                    // so the per-model retry-rate card can be aggregated against the
+                    // model's worker URLs. This may slightly over-count on the last
+                    // attempt (when the executor gives up instead of retrying), but
+                    // that's bounded by max_retries and far cheaper than rewiring the
+                    // executor's on_backoff hook to carry worker context.
+                    RouterMetrics::record_retry(route, worker.url(), worker.instance());
+                } else {
+                    RouterMetrics::record_request_error(route, "non_retryable_error");
+                }
 
                 // send_typed_request always decrements the load counter on its way out
                 // (success, non-retryable failure, error, body-read failure — every branch).
@@ -700,23 +755,15 @@ impl Router {
             },
             // should_retry predicate
             |res, _attempt| is_retryable_status(res.status()),
-            // on_backoff hook
+            // on_backoff hook — retry counter is now recorded inside the closure
+            // where we have worker context. Here we only record the backoff timing.
             |delay, attempt| {
-                RouterMetrics::record_retry(route);
                 RouterMetrics::record_retry_backoff_duration(delay, attempt);
             },
             // on_exhausted hook
             || RouterMetrics::record_retries_exhausted(route),
         )
         .await;
-
-        if response.status().is_success() {
-            let duration = start.elapsed();
-            RouterMetrics::record_request(route);
-            RouterMetrics::record_generate_duration(duration);
-        } else if !is_retryable_status(response.status()) {
-            RouterMetrics::record_request_error(route, "non_retryable_error");
-        }
 
         response
     }
@@ -853,7 +900,7 @@ impl Router {
         route: &str,
         worker_url: &str,
         is_stream: bool,
-        load_incremented: bool, // Whether load was incremented for this request
+        load_guard: Option<LoadGuard>, // owns the in-flight counter increment
     ) -> Response {
         let (mut request_builder, extracted_dp_rank, request_url) =
             if self.intra_node_data_parallel_size > 1 {
@@ -937,15 +984,7 @@ impl Router {
                     "Failed to send typed request worker_url={} route={} error={}",
                     worker_url, route, e
                 );
-
-                // Decrement load on error if it was incremented
-                if load_incremented {
-                    if let Some(worker) = self.worker_registry.get_by_url(worker_url) {
-                        worker.decrement_load();
-                        RouterMetrics::set_running_requests(worker_url, worker.load());
-                    }
-                }
-
+                // load_guard drops at function exit → decrement runs automatically.
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Request failed: {}", e),
@@ -961,7 +1000,9 @@ impl Router {
             // For non-streaming requests, preserve headers
             let response_headers = header_utils::preserve_response_headers(res.headers());
 
-            let response = match res.bytes().await {
+            // load_guard drops at end of this scope → decrement runs once,
+            // whether body read succeeded, errored, or the future was cancelled.
+            match res.bytes().await {
                 Ok(body) => {
                     let mut response = Response::new(axum::body::Body::from(body));
                     *response.status_mut() = status;
@@ -969,27 +1010,17 @@ impl Router {
                     response
                 }
                 Err(e) => {
-                    // Note: load decrement happens unconditionally below — do NOT decrement here.
                     let error_msg = format!("Failed to get response body: {}", e);
                     (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response()
                 }
-            };
-
-            // Decrement load counter exactly once for non-streaming requests, regardless of
-            // whether the body was successfully read. Avoid double-decrementing on body-read
-            // failure, which under heavy load was driving the gauge far below the true value.
-            if load_incremented {
-                if let Some(worker) = self.worker_registry.get_by_url(worker_url) {
-                    worker.decrement_load();
-                    RouterMetrics::set_running_requests(worker_url, worker.load());
-                }
             }
-
-            response
-        } else if load_incremented {
-            // For streaming with load tracking, we need to manually decrement when done
-            let registry = Arc::clone(&self.worker_registry);
-            let worker_url = worker_url.to_string();
+        } else if load_guard.is_some() {
+            // Move the LoadGuard into the spawned forwarding task. The task's
+            // lifetime is decoupled from the client's connection (axum dropping
+            // our handler future has no effect on a tokio::spawn'd task), so the
+            // guard's Drop runs exactly when stream forwarding actually ends —
+            // be that the [DONE] marker, an upstream error, or a panic.
+            let guard = load_guard;
 
             // Preserve headers for streaming response
             let mut response_headers = header_utils::preserve_response_headers(res.headers());
@@ -999,41 +1030,32 @@ impl Router {
             let stream = res.bytes_stream();
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-            // Spawn task to forward stream and detect completion
             tokio::spawn(async move {
+                let _guard = guard; // hold for the entire forward loop
                 let mut stream = stream;
-                let mut decremented = false;
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            // Check for stream end marker
-                            if bytes
-                                .as_ref()
-                                .windows(12)
-                                .any(|window| window == b"data: [DONE]")
-                            {
-                                if let Some(worker) = registry.get_by_url(&worker_url) {
-                                    worker.decrement_load();
-                                    RouterMetrics::set_running_requests(&worker_url, worker.load());
-                                    decremented = true;
+                loop {
+                    tokio::select! {
+                        // Stop as soon as the client goes away, even if no chunk has
+                        // arrived yet (request still queued upstream with no first
+                        // token). Breaking drops `stream`, which closes the connection
+                        // to the worker so vLLM aborts the request instead of leaving
+                        // it to pile up in the waiting queue.
+                        _ = tx.closed() => break,
+                        chunk = stream.next() => match chunk {
+                            Some(Ok(bytes)) => {
+                                if tx.send(Ok(bytes)).is_err() {
+                                    break;
                                 }
                             }
-                            if tx.send(Ok(bytes)).is_err() {
+                            Some(Err(e)) => {
+                                let _ = tx.send(Err(format!("Stream error: {}", e)));
                                 break;
                             }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(format!("Stream error: {}", e)));
-                            break;
-                        }
+                            None => break,
+                        },
                     }
                 }
-                if !decremented {
-                    if let Some(worker) = registry.get_by_url(&worker_url) {
-                        worker.decrement_load();
-                        RouterMetrics::set_running_requests(&worker_url, worker.load());
-                    }
-                }
+                // _guard drops here → decrement runs once.
             });
 
             let stream = UnboundedReceiverStream::new(rx);
@@ -1056,17 +1078,24 @@ impl Router {
             // Spawn task to forward stream
             tokio::spawn(async move {
                 let mut stream = stream;
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            if tx.send(Ok(bytes)).is_err() {
+                loop {
+                    tokio::select! {
+                        // Client disconnected: stop pulling from upstream so the
+                        // worker connection drops and the request is aborted rather
+                        // than left queued.
+                        _ = tx.closed() => break,
+                        chunk = stream.next() => match chunk {
+                            Some(Ok(bytes)) => {
+                                if tx.send(Ok(bytes)).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                let _ = tx.send(Err(format!("Stream error: {}", e)));
                                 break;
                             }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(format!("Stream error: {}", e)));
-                            break;
-                        }
+                            None => break,
+                        },
                     }
                 }
             });

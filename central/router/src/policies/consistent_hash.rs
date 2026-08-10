@@ -370,13 +370,14 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             None => {
                 // Fallback to first healthy worker if hash ring is empty
                 let fallback_idx = healthy_indices[0];
-                let worker_url = workers[fallback_idx].url();
+                let __sel = workers[fallback_idx].as_ref();
+
+                let worker_url = __sel.url();
                 info!(
                     "CONSISTENT_HASH_DEBUG: Hash ring empty, falling back to worker: {}",
                     worker_url
                 );
-                RouterMetrics::record_processed_request(worker_url);
-                RouterMetrics::record_policy_decision(self.name(), worker_url);
+                RouterMetrics::record_policy_decision(self.name(), worker_url, __sel.instance());
                 return Some(fallback_idx);
             }
         };
@@ -405,7 +406,9 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             Some(idx) => {
                 // Verify the worker is healthy
                 if workers[idx].is_healthy() && workers[idx].circuit_breaker().can_execute() {
-                    let worker_url = workers[idx].url();
+                    let __sel = workers[idx].as_ref();
+
+                    let worker_url = __sel.url();
                     debug!(
                         "CONSISTENT_HASH_DEBUG: Selected worker at index {}: {}",
                         idx, worker_url
@@ -417,8 +420,7 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
 
                     // Increment processed counter
                     workers[idx].increment_processed();
-                    RouterMetrics::record_processed_request(worker_url);
-                    RouterMetrics::record_policy_decision(self.name(), worker_url);
+                    RouterMetrics::record_policy_decision(self.name(), worker_url, __sel.instance());
 
                     Some(idx)
                 } else {
@@ -428,11 +430,12 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
                         workers[idx].url()
                     );
                     let fallback_idx = healthy_indices[0];
-                    let worker_url = workers[fallback_idx].url();
+                    let __sel = workers[fallback_idx].as_ref();
+
+                    let worker_url = __sel.url();
 
                     workers[fallback_idx].increment_processed();
-                    RouterMetrics::record_processed_request(worker_url);
-                    RouterMetrics::record_policy_decision(self.name(), worker_url);
+                    RouterMetrics::record_policy_decision(self.name(), worker_url, __sel.instance());
 
                     Some(fallback_idx)
                 }
@@ -444,11 +447,12 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
                     target_worker_url
                 );
                 let fallback_idx = healthy_indices[0];
-                let worker_url = workers[fallback_idx].url();
+                let __sel = workers[fallback_idx].as_ref();
+
+                let worker_url = __sel.url();
 
                 workers[fallback_idx].increment_processed();
-                RouterMetrics::record_processed_request(worker_url);
-                RouterMetrics::record_policy_decision(self.name(), worker_url);
+                RouterMetrics::record_policy_decision(self.name(), worker_url, __sel.instance());
 
                 Some(fallback_idx)
             }

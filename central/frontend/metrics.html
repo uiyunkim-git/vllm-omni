@@ -25,6 +25,124 @@
 .chart-wrap-tall { position: relative; height: 360px; }
 .chart-wrap-bars { position: relative; height: var(--bar-chart-h, 280px); min-height: 240px; }
 
+.inflight-table {
+    padding: .25rem 1rem .75rem;
+    font-size: .82rem;
+}
+.if-group {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: .35rem;
+    border-radius: 6px;
+}
+.if-group-head {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) minmax(80px, 140px) auto;
+    gap: .55rem;
+    align-items: center;
+    padding: .5rem .55rem;
+    cursor: pointer;
+    border-bottom: 1px solid #e5e7eb;
+    user-select: none;
+}
+.if-group-rps, .if-rps {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #4b5563;
+    font-size: .78rem;
+    font-weight: 500;
+}
+.if-rps-unit {
+    color: #9ca3af;
+    font-size: .65rem;
+    font-weight: 400;
+    margin-left: .1rem;
+}
+.if-group-bar {
+    height: 6px;
+    background: #f3f4f6;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.if-group-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #34d399, #10b981);
+    border-radius: 3px;
+    transition: width .25s ease;
+}
+.if-group-head:hover { background: #f9fafb; }
+.if-caret {
+    font-size: .65rem;
+    color: #9ca3af;
+    transition: transform .15s ease;
+    line-height: 1;
+}
+.if-group.open .if-caret { transform: rotate(90deg); }
+.if-group-title {
+    font-size: .68rem;
+    font-weight: 600;
+    color: #374151;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.if-group-meta {
+    font-size: .68rem;
+    color: #6b7280;
+    margin-left: .35rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+}
+.if-group-total {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: #111827;
+    font-size: .8rem;
+}
+.if-group-body { display: none; padding: .25rem 0 .35rem; }
+.if-group.open .if-group-body { display: block; }
+.if-row {
+    display: grid;
+    grid-template-columns: 8px 80px 1fr 80px;
+    gap: .55rem;
+    align-items: center;
+    padding: .2rem .55rem;
+}
+.if-row:hover { background: #f9fafb; }
+.if-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+}
+.if-dot.s-open    { background: #ef4444; }
+.if-dot.s-half    { background: #f59e0b; }
+.if-dot.s-unknown { background: #d1d5db; }
+.if-port {
+    color: #6b7280;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .72rem;
+}
+.if-bar {
+    height: 5px;
+    background: #f3f4f6;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.if-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #60a5fa, #3b82f6);
+    border-radius: 3px;
+    transition: width .25s ease;
+}
+.if-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: #111827;
+    font-size: .78rem;
+}
+
 .cb-closed   { color: #059669; }
 .cb-open     { color: #dc2626; }
 .cb-half     { color: #d97706; }
@@ -74,7 +192,7 @@
 <!-- ── LIVE section ────────────────────────────────────────────────────── -->
 <div class="section-h live">
     <span class="live-dot"></span><span>Live</span>
-    <span class="badge bg-light text-muted border">real-time · refreshed every 2 s</span>
+    <span class="badge bg-light text-muted border">real-time · refreshed every 5 s</span>
 </div>
 <div class="row g-3 mb-3">
     <div class="col-12 col-md-4">
@@ -100,11 +218,19 @@
     </div>
 </div>
 <div class="row g-3 mb-1">
-    <div class="col-12">
-        <div class="card">
+    <div class="col-lg-6">
+        <div class="card h-100">
             <div class="card-header"><span class="live-dot"></span>In-flight per worker</div>
-            <div class="card-body">
-                <div class="chart-wrap-bars" id="inflight-chart-wrap"><canvas id="inflight-chart"></canvas></div>
+            <div class="card-body p-0">
+                <div class="inflight-table" id="inflight-table-body"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><span class="live-dot"></span>Throughput per worker <span class="text-muted fw-normal" style="font-size:.72rem">· last 5s</span></div>
+            <div class="card-body p-0">
+                <div class="inflight-table" id="throughput-table-body"></div>
             </div>
         </div>
     </div>
@@ -117,11 +243,12 @@
     <span class="sublabel ms-2">·</span>
     <span class="sublabel">applies to all charts below</span>
     <div class="pill-row ms-auto" id="window-pills">
+        <button class="pill" data-win="30">30 sec</button>
+        <button class="pill" data-win="60">1 min</button>
+        <button class="pill" data-win="300">5 min</button>
         <button class="pill" data-win="900">15 min</button>
         <button class="pill active" data-win="3600">1 hour</button>
         <button class="pill" data-win="21600">6 hours</button>
-        <button class="pill" data-win="43200">12 hours</button>
-        <button class="pill" data-win="86400">24 hours</button>
     </div>
 </div>
 <div class="row g-3 mb-3">
@@ -176,69 +303,44 @@
                 <span>Per-worker requests</span>
                 <span class="small text-muted" id="perworker-window-label">in window</span>
             </div>
-            <div class="card-body">
-                <div class="chart-wrap-bars" id="worker-chart-wrap"><canvas id="worker-chart"></canvas></div>
+            <div class="card-body p-0">
+                <div class="inflight-table" id="perworker-table-body"></div>
             </div>
         </div>
     </div>
     <div class="col-12 col-lg-5">
-        <div class="card h-100">
+        <div class="card h-100 d-flex flex-column">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span>Latency distribution</span>
                 <span class="small text-muted" id="latency-window-label">in window</span>
             </div>
-            <div class="card-body">
-                <div class="chart-wrap"><canvas id="latency-chart"></canvas></div>
+            <div class="card-body p-0">
+                <div class="inflight-table" id="latency-table-body"></div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- ── CUMULATIVE section ─────────────────────────────────────────────── -->
-<div class="section-h cumulative">
-    <i class="fa-solid fa-infinity"></i><span>Cumulative</span>
-    <span class="badge bg-light text-muted border">since router start</span>
-</div>
-<div class="row g-3 mb-3">
-    <div class="col-12">
-        <div class="text-muted small mb-1"><i class="fa-solid fa-shield-halved me-1"></i>Circuit breakers</div>
-    </div>
-</div>
 <div class="row g-3 mb-3">
     <div class="col-12 col-lg-6">
         <div class="card h-100">
-            <div class="card-header">States and outcomes per worker</div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-shield-halved me-1"></i>CB failures per worker</span>
+                <span class="small text-muted" id="cb-failure-window-label">in window</span>
+            </div>
             <div class="card-body p-0">
-                <table class="table table-sm mb-0" id="cb-table">
-                    <thead class="table-light"><tr>
-                        <th>Worker</th><th>State</th><th class="text-end">Success</th><th class="text-end">Failure</th>
-                    </tr></thead>
-                    <tbody id="cb-tbody"></tbody>
-                </table>
+                <div class="inflight-table" id="cb-failure-table-body"></div>
             </div>
         </div>
     </div>
     <div class="col-12 col-lg-6">
         <div class="card h-100">
-            <div class="card-header">Success vs failure per worker</div>
-            <div class="card-body">
-                <div class="chart-wrap-bars" id="cb-outcomes-wrap"><canvas id="cb-outcomes-chart"></canvas></div>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="fa-solid fa-rotate me-1"></i>CB state transitions</span>
+                <span class="small text-muted" id="cb-transitions-window-label">in window</span>
             </div>
-        </div>
-    </div>
-</div>
-
-<div class="row g-3 mb-2">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">CB state transitions</div>
             <div class="card-body p-0">
-                <table class="table table-sm mb-0">
-                    <thead class="table-light"><tr>
-                        <th>Worker</th><th>From</th><th>To</th><th class="text-end">Count</th>
-                    </tr></thead>
-                    <tbody id="cb-trans-tbody"></tbody>
-                </table>
+                <div class="inflight-table" id="cb-transitions-body"></div>
             </div>
         </div>
     </div>
@@ -256,16 +358,38 @@ const PALETTE = [
 const ALL_TAB = '__all__';
 const TAB_STORAGE_KEY = 'metrics_selected_tab_v3';
 const WIN_STORAGE_KEY = 'metrics_selected_window_v2';
-const ALLOWED_WINDOWS = [900, 3600, 21600, 43200, 86400];
-const POLL_INTERVAL_MS = 2000;
+const ALLOWED_WINDOWS = [30, 60, 300, 900, 3600, 21600];
+const POLL_INTERVAL_MS = 5000;
 const HISTORY_INTERVAL_MS = 5000;
 
-let selectedDep = localStorage.getItem(TAB_STORAGE_KEY) || ALL_TAB;
-let selectedWindow = parseInt(localStorage.getItem(WIN_STORAGE_KEY) || '3600', 10);
+// Tab/window state: URL query string is the source of truth (?dep=...&window=...),
+// with localStorage as a fallback for plain navigations that don't carry the query.
+const _urlParams = new URLSearchParams(window.location.search);
+let selectedDep = _urlParams.get('dep')
+    || localStorage.getItem(TAB_STORAGE_KEY)
+    || ALL_TAB;
+let selectedWindow = parseInt(
+    _urlParams.get('window')
+    || localStorage.getItem(WIN_STORAGE_KEY)
+    || '3600',
+    10
+);
 if (!ALLOWED_WINDOWS.includes(selectedWindow)) selectedWindow = 3600;
 let lastData = null;
 
-const WINDOW_LABELS = { 900: 'last 15 min', 3600: 'last 1 hour', 21600: 'last 6 hours', 43200: 'last 12 hours', 86400: 'last 24 hours' };
+function syncUrlState() {
+    const url = new URL(window.location.href);
+    url.searchParams.set('window', String(selectedWindow));
+    if (selectedDep === ALL_TAB) url.searchParams.delete('dep');
+    else url.searchParams.set('dep', selectedDep);
+    window.history.replaceState(null, '', url.toString());
+}
+syncUrlState();
+
+const WINDOW_LABELS = {
+    30: 'last 30s', 60: 'last 1 min', 300: 'last 5 min',
+    900: 'last 15 min', 3600: 'last 1 hour', 21600: 'last 6 hours',
+};
 function windowLabel(s) { return WINDOW_LABELS[s] || `last ${s}s`; }
 
 function shortWorker(w) {
@@ -306,6 +430,7 @@ const rpsChart = new Chart(rpsCtx, {
         label: 'RPS', data: [],
         borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.12)',
         fill: true, tension: 0.35, pointRadius: 1,
+        spanGaps: false,
     }]},
     options: {
         animation: false, responsive: true, maintainAspectRatio: false,
@@ -317,67 +442,40 @@ const rpsChart = new Chart(rpsCtx, {
     }
 });
 
-const wCtx = document.getElementById('worker-chart').getContext('2d');
-const workerChart = new Chart(wCtx, {
-    type: 'bar',
-    data: { labels: [], datasets: [{ label: 'Requests in window', data: [], backgroundColor: PALETTE }] },
-    options: {
-        animation: false, responsive: true, maintainAspectRatio: false,
-        indexAxis: 'y',
-        plugins: { legend: { display: false } },
-        scales: {
-            x: { beginAtZero: true, ticks: { font: { size: 11 } } },
-            y: { ticks: { font: { size: 11 }, autoSkip: false } }
-        }
-    }
-});
+const inflightTableBody = document.getElementById('inflight-table-body');
+const throughputTableBody = document.getElementById('throughput-table-body');
+const perworkerTableBody = document.getElementById('perworker-table-body');
+const latencyTableBody = document.getElementById('latency-table-body');
+// Expansion state per table — shared host name set but tracked separately so
+// expanding "kbds-worker-003" in the in-flight table doesn't also pop it open
+// in the throughput table next to it.
+const inflightExpanded = new Set();
+const throughputExpanded = new Set();
+function toggleInflightGroup(host) {
+    if (inflightExpanded.has(host)) inflightExpanded.delete(host);
+    else inflightExpanded.add(host);
+    if (lastData) renderLive(lastData);
+}
+function toggleThroughputGroup(host) {
+    if (throughputExpanded.has(host)) throughputExpanded.delete(host);
+    else throughputExpanded.add(host);
+    if (lastData) renderLive(lastData);
+}
+const perworkerExpanded = new Set();
+function togglePerworkerGroup(host) {
+    if (perworkerExpanded.has(host)) perworkerExpanded.delete(host);
+    else perworkerExpanded.add(host);
+    if (lastData) renderWindow(lastData);
+}
 
-const ifCtx = document.getElementById('inflight-chart').getContext('2d');
-const inflightChart = new Chart(ifCtx, {
-    type: 'bar',
-    data: { labels: [], datasets: [{ label: 'In-flight (now)', data: [], backgroundColor: PALETTE }] },
-    options: {
-        animation: false, responsive: true, maintainAspectRatio: false,
-        indexAxis: 'y',
-        plugins: { legend: { display: false } },
-        scales: {
-            x: { beginAtZero: true, ticks: { font: { size: 11 } } },
-            y: { ticks: { font: { size: 11 }, autoSkip: false } }
-        }
-    }
-});
-
-const latCtx = document.getElementById('latency-chart').getContext('2d');
-const latencyChart = new Chart(latCtx, {
-    type: 'bar',
-    data: { labels: [], datasets: [{ label: 'Requests', data: [], backgroundColor: '#6366f1' }] },
-    options: {
-        animation: false, responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-            x: { title: { display: true, text: 'Latency bucket (s)', font: { size: 11 } }, ticks: { font: { size: 10 } } },
-            y: { beginAtZero: true, title: { display: true, text: 'Requests', font: { size: 11 } }, ticks: { font: { size: 11 } } }
-        }
-    }
-});
-
-const cbCtx = document.getElementById('cb-outcomes-chart').getContext('2d');
-const cbOutcomesChart = new Chart(cbCtx, {
-    type: 'bar',
-    data: { labels: [], datasets: [
-        { label: 'Success', data: [], backgroundColor: '#10b981' },
-        { label: 'Failure', data: [], backgroundColor: '#ef4444' },
-    ]},
-    options: {
-        animation: false, responsive: true, maintainAspectRatio: false,
-        indexAxis: 'y',
-        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
-        scales: {
-            x: { stacked: true, beginAtZero: true, ticks: { font: { size: 11 } } },
-            y: { stacked: true, ticks: { font: { size: 11 }, autoSkip: false } }
-        }
-    }
-});
+const cbFailureTableBody = document.getElementById('cb-failure-table-body');
+const cbTransitionsBody = document.getElementById('cb-transitions-body');
+const cbFailureExpanded = new Set();
+function toggleCbFailureGroup(host) {
+    if (cbFailureExpanded.has(host)) cbFailureExpanded.delete(host);
+    else cbFailureExpanded.add(host);
+    if (lastData) renderWindow(lastData);
+}
 
 // ── Live 5-second RPS computed client-side from cumulative processed ─────
 let _liveBuffer = {};   // depKey -> [{ ts_ms, total }, ...]
@@ -397,6 +495,27 @@ function computeLive5sRps(nowMs, totalProcessed) {
     if (dt < 1) return null;
     const delta = Math.max(0, totalProcessed - anchor.total);
     return delta / dt;
+}
+
+// Per-worker variant of computeLive5sRps. Each worker URL gets its own ring
+// buffer of recent (ts_ms, cumulative_processed) so we can derive a 5s rate
+// without depending on the rolling window selection.
+const _workerLiveBuf = new Map();
+function workerLive5sRps(url, nowMs, processed) {
+    let buf = _workerLiveBuf.get(url);
+    if (!buf) { buf = []; _workerLiveBuf.set(url, buf); }
+    buf.push({ ts_ms: nowMs, total: processed });
+    const drop_before = nowMs - 10_000;
+    while (buf.length > 1 && buf[0].ts_ms < drop_before) buf.shift();
+    const target_old = nowMs - 5000;
+    let anchor = buf[0];
+    for (const s of buf) {
+        if (s.ts_ms <= target_old) anchor = s;
+        else break;
+    }
+    const dt = (nowMs - anchor.ts_ms) / 1000;
+    if (dt < 1) return null;
+    return Math.max(0, processed - anchor.total) / dt;
 }
 
 // ── RPS chart label formatting based on window ──────────────────────────
@@ -451,11 +570,13 @@ function renderTabs(d) {
             if (dep === selectedDep) return;
             selectedDep = dep;
             try { localStorage.setItem(TAB_STORAGE_KEY, selectedDep); } catch {}
-            refreshRpsHistory();
-            // Deployment changes the filter for BOTH live and window sections,
-            // so re-render both from the cached lastData immediately.
-            if (lastData) { renderLive(lastData); renderWindow(lastData); }
+            syncUrlState();
             container.querySelectorAll('.pill').forEach(p => p.classList.toggle('active', p.getAttribute('data-dep') === selectedDep));
+            // Tab change must refresh BOTH live and window sections (the previous
+            // tab's data was scoped to that tab's worker URLs server-side). Use
+            // updateLive=true and don't wait for the next 5s poll tick.
+            refreshRpsHistory();
+            fetchData(true);
         });
     });
 }
@@ -467,6 +588,7 @@ document.querySelectorAll('#window-pills .pill').forEach(el => {
         if (win === selectedWindow) return;
         selectedWindow = win;
         try { localStorage.setItem(WIN_STORAGE_KEY, String(win)); } catch {}
+        syncUrlState();
         document.querySelectorAll('#window-pills .pill').forEach(p =>
             p.classList.toggle('active', parseInt(p.dataset.win, 10) === selectedWindow));
         // Refresh ONLY the rolling-window section. Live values are intentionally untouched
@@ -491,16 +613,96 @@ function renderLive(d) {
     const rps5s = computeLive5sRps(nowMs, sumProcessed);
     document.getElementById('c-rps-live').textContent = fmtRate(rps5s);
 
-    // In-flight per worker chart (live gauge value)
-    const labels = workers.map(w => shortWorker(w));
-    const barHeight = Math.max(240, labels.length * 26 + 60);
-    const barColors = workers.map((_, i) => PALETTE[i % PALETTE.length]);
-    document.getElementById('inflight-chart-wrap').style.setProperty('--bar-chart-h', barHeight + 'px');
-    inflightChart.data.labels = labels;
-    inflightChart.data.datasets[0].data = workers.map(w => w.running || 0);
-    inflightChart.data.datasets[0].backgroundColor = barColors;
-    inflightChart.resize();
-    inflightChart.update('none');
+    // Build host groups once — both tables share the same grouping.
+    const sorted = [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)));
+    const groups = new Map();
+    for (const w of sorted) {
+        const full = shortWorker(w);
+        const sep = full.lastIndexOf(':');
+        const host = sep === -1 ? full : full.slice(0, sep);
+        if (!groups.has(host)) groups.set(host, []);
+        groups.get(host).push(w);
+    }
+    const groupArr = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+    const cbDotClass = s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown';
+
+    // Per-worker live 5s RPS, plus aggregate per group, from client-side buffer.
+    const workerRps = new Map();
+    for (const w of sorted) {
+        workerRps.set(w.url, workerLive5sRps(w.url, nowMs, w.processed || 0));
+    }
+    const groupRps = new Map();
+    for (const [host, ws] of groupArr) {
+        let total = 0, any = false;
+        for (const w of ws) {
+            const r = workerRps.get(w.url);
+            if (r != null) { total += r; any = true; }
+        }
+        groupRps.set(host, any ? total : null);
+    }
+
+    renderGroupedTable({
+        body: inflightTableBody,
+        groups: groupArr,
+        expanded: inflightExpanded,
+        toggleFn: 'toggleInflightGroup',
+        workerValue: w => w.running || 0,
+        groupValue: ws => ws.reduce((s, w) => s + (w.running || 0), 0),
+        fmtWorker: v => fmtInt(v),
+        fmtGroup: v => fmtInt(v),
+        unit: '',
+        cbDotClass,
+    });
+    renderGroupedTable({
+        body: throughputTableBody,
+        groups: groupArr,
+        expanded: throughputExpanded,
+        toggleFn: 'toggleThroughputGroup',
+        workerValue: w => workerRps.get(w.url),
+        groupValue: (_, host) => groupRps.get(host),
+        fmtWorker: v => v == null ? '—' : fmtRate(v),
+        fmtGroup: v => v == null ? '—' : fmtRate(v),
+        unit: 'req/s',
+        cbDotClass,
+    });
+}
+
+// Shared renderer for In-flight and Throughput tables. Each table maps the same
+// host-grouped worker list onto a different value (current load vs 5s rate) but
+// keeps a consistent collapse/bar/row layout.
+function renderGroupedTable({ body, groups, expanded, toggleFn, workerValue, groupValue, fmtWorker, fmtGroup, unit, cbDotClass }) {
+    const groupVals = groups.map(([host, ws]) => groupValue(ws, host));
+    const maxGroupVal = Math.max(1, ...groupVals.filter(v => v != null));
+    const allWorkerVals = groups.flatMap(([, ws]) => ws.map(workerValue).filter(v => v != null));
+    const maxWorkerVal = Math.max(1, ...allWorkerVals);
+    const unitSpan = unit ? ` <span class="if-rps-unit">${unit}</span>` : '';
+    body.innerHTML = groups.map(([host, ws], gi) => {
+        const gv = groupVals[gi];
+        const groupPct = gv == null ? 0 : Math.min(100, Math.round(gv / maxGroupVal * 100));
+        const openClass = expanded.has(host) ? 'open' : '';
+        const rows = ws.map(w => {
+            const full = shortWorker(w);
+            const sep = full.lastIndexOf(':');
+            const port = sep === -1 ? full : full.slice(sep + 1);
+            const wv = workerValue(w);
+            const pct = wv == null ? 0 : Math.min(100, Math.round(wv / maxWorkerVal * 100));
+            return `<div class="if-row" title="${full}">
+                <span class="if-dot ${cbDotClass(w.cb_state)}"></span>
+                <span class="if-port">:${port}</span>
+                <div class="if-bar"><div class="if-bar-fill" style="width:${pct}%"></div></div>
+                <span class="if-num">${fmtWorker(wv)}${unitSpan}</span>
+            </div>`;
+        }).join('');
+        return `<div class="if-group ${openClass}" data-host="${host}">
+            <div class="if-group-head" onclick="${toggleFn}('${host}')">
+                <span class="if-caret">▶</span>
+                <span class="if-group-title">${host}<span class="if-group-meta">${ws.length} workers</span></span>
+                <div class="if-group-bar"><div class="if-group-bar-fill" style="width:${groupPct}%"></div></div>
+                <span class="if-group-total">${fmtGroup(gv)}${unitSpan}</span>
+            </div>
+            <div class="if-group-body">${rows}</div>
+        </div>`;
+    }).join('') || `<div class="text-center text-muted py-3">No workers</div>`;
 }
 
 function renderWindow(d) {
@@ -533,67 +735,102 @@ function renderWindow(d) {
     document.getElementById('c-latency').textContent   = (avgLat || 0).toFixed(2) + ' s';
     document.getElementById('c-retries').textContent   = (retryPct || 0).toFixed(2) + ' %';
 
-    // Per-worker bar (windowed)
-    const labels = workers.map(w => shortWorker(w));
-    const barHeight = Math.max(240, labels.length * 26 + 60);
-    const barColors = workers.map((_, i) => PALETTE[i % PALETTE.length]);
-    document.getElementById('worker-chart-wrap').style.setProperty('--bar-chart-h', barHeight + 'px');
-    workerChart.data.labels = labels;
-    workerChart.data.datasets[0].data = workers.map(w => w.processed_window || 0);
-    workerChart.data.datasets[0].backgroundColor = barColors;
-    workerChart.resize();
-    workerChart.update('none');
+    // Per-worker requests (windowed) — reuse the grouped-table UI from the LIVE
+    // section so this looks consistent with In-flight / Throughput tables above.
+    const pwGroups = new Map();
+    for (const w of [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)))) {
+        const full = shortWorker(w);
+        const sep = full.lastIndexOf(':');
+        const host = sep === -1 ? full : full.slice(0, sep);
+        if (!pwGroups.has(host)) pwGroups.set(host, []);
+        pwGroups.get(host).push(w);
+    }
+    const pwGroupArr = [...pwGroups.entries()].sort((a, b) => b[1].length - a[1].length);
+    const cbDotClass = s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown';
+    renderGroupedTable({
+        body: perworkerTableBody,
+        groups: pwGroupArr,
+        expanded: perworkerExpanded,
+        toggleFn: 'togglePerworkerGroup',
+        workerValue: w => w.processed_window || 0,
+        groupValue: ws => ws.reduce((s, w) => s + (w.processed_window || 0), 0),
+        fmtWorker: v => fmtInt(v),
+        fmtGroup: v => fmtInt(v),
+        unit: '',
+        cbDotClass,
+    });
 
-    // Latency histogram (windowed — driven by the rolling-window selector)
+    // Latency distribution (windowed) — one row per bucket with an intensity bar.
     const elLat = document.getElementById('latency-window-label');
     if (elLat) elLat.textContent = winLbl;
     const histSrc = d.latency_histogram_window || d.latency_histogram || [];
-    const nonZero = histSrc.filter(b => b.count > 0);
-    latencyChart.data.labels = nonZero.map(b => b.le + 's');
-    latencyChart.data.datasets[0].data = nonZero.map(b => b.count);
-    latencyChart.update('none');
+    let lo = 0, hi = histSrc.length - 1;
+    while (lo < histSrc.length && histSrc[lo].count === 0) lo++;
+    while (hi > lo && histSrc[hi].count === 0) hi--;
+    const shown = lo <= hi ? histSrc.slice(lo, hi + 1) : [];
+    const latTotal = shown.reduce((s, b) => s + b.count, 0) || 1;
+    const maxBucket = Math.max(1, ...shown.map(b => b.count));
+    latencyTableBody.innerHTML = shown.map((b, i) => {
+        const lower = (lo + i === 0) ? '0' : histSrc[lo + i - 1].le;
+        const label = `${lower}–${b.le}s`;
+        const pct = Math.min(100, Math.round(b.count / maxBucket * 100));
+        const sharePct = (b.count / latTotal * 100).toFixed(1);
+        return `<div class="if-row" title="${label} — ${fmtInt(b.count)} requests (${sharePct}%)" style="grid-template-columns: 90px 1fr 90px;">
+            <span class="if-port" style="font-family: inherit; font-size: .78rem; color: #4b5563;">${label}</span>
+            <div class="if-bar" style="height: 7px;"><div class="if-bar-fill" style="width:${pct}%; background: linear-gradient(90deg, #818cf8, #6366f1);"></div></div>
+            <span class="if-num">${fmtInt(b.count)} <span class="if-rps-unit">${sharePct}%</span></span>
+        </div>`;
+    }).join('') || `<div class="text-center text-muted py-3">No latency data</div>`;
 
-    // CB table
-    const cbTbody = document.getElementById('cb-tbody');
-    cbTbody.innerHTML = workers.map(w => `
-        <tr>
-            <td class="small text-monospace">${shortWorker(w)}</td>
-            <td>${cbStateLabel(w.cb_state)}</td>
-            <td class="text-end text-success">${fmtInt(w.cb_success)}</td>
-            <td class="text-end text-danger">${w.cb_failure > 0 ? '<b>' + fmtInt(w.cb_failure) + '</b>' : '0'}</td>
-        </tr>`).join('') || '<tr><td colspan="4" class="text-muted text-center small py-3">No workers in this group</td></tr>';
+    // CB failures per worker (windowed). Same grouped-table UI as everything else.
+    document.getElementById('cb-failure-window-label').textContent = winLbl;
+    const cbGroups = new Map();
+    for (const w of [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)))) {
+        const full = shortWorker(w);
+        const sep = full.lastIndexOf(':');
+        const host = sep === -1 ? full : full.slice(0, sep);
+        if (!cbGroups.has(host)) cbGroups.set(host, []);
+        cbGroups.get(host).push(w);
+    }
+    const cbGroupArr = [...cbGroups.entries()].sort((a, b) => b[1].length - a[1].length);
+    renderGroupedTable({
+        body: cbFailureTableBody,
+        groups: cbGroupArr,
+        expanded: cbFailureExpanded,
+        toggleFn: 'toggleCbFailureGroup',
+        workerValue: w => w.cb_failure_window || 0,
+        groupValue: ws => ws.reduce((s, w) => s + (w.cb_failure_window || 0), 0),
+        fmtWorker: v => fmtInt(v),
+        fmtGroup: v => fmtInt(v),
+        unit: '',
+        cbDotClass: s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown',
+    });
 
-    // CB outcomes stacked bar
-    const cbWorkers = workers.filter(w => w.cb_success > 0 || w.cb_failure > 0);
-    const cbHeight = Math.max(240, cbWorkers.length * 26 + 60);
-    document.getElementById('cb-outcomes-wrap').style.setProperty('--bar-chart-h', cbHeight + 'px');
-    cbOutcomesChart.data.labels = cbWorkers.map(w => shortWorker(w));
-    cbOutcomesChart.data.datasets[0].data = cbWorkers.map(w => w.cb_success);
-    cbOutcomesChart.data.datasets[1].data = cbWorkers.map(w => w.cb_failure);
-    cbOutcomesChart.resize();
-    cbOutcomesChart.update('none');
-
-    // CB transitions
+    // CB state transitions (windowed) — flat list of transitions that happened
+    // in this window. Hidden when nothing has transitioned.
+    document.getElementById('cb-transitions-window-label').textContent = winLbl;
     const transRows = (d.cb_transitions || []).filter(t => {
         if (isAll) return true;
         const found = (d.per_worker || []).find(w => w.url === t.worker);
         return found && found.served_model_name === selectedDep;
     });
-    const transTbody = document.getElementById('cb-trans-tbody');
-    transTbody.innerHTML = transRows.length === 0
-        ? '<tr><td colspan="4" class="text-muted text-center small py-2">No transitions recorded</td></tr>'
+    cbTransitionsBody.innerHTML = transRows.length === 0
+        ? '<div class="text-center text-muted py-3">No transitions in this window</div>'
         : transRows.map(t => `
-            <tr>
-                <td class="small">${t.name || t.worker}</td>
-                <td><span class="badge bg-secondary">${t.from_state}</span></td>
-                <td><span class="badge bg-secondary">${t.to_state}</span></td>
-                <td class="text-end">${t.count}</td>
-            </tr>`).join('');
+            <div class="if-row" style="grid-template-columns: 1fr auto auto auto 56px;" title="cumulative: ${t.count}">
+                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.name || t.worker}</span>
+                <span class="badge bg-secondary" style="font-size:.65rem;">${t.from_state}</span>
+                <span style="color:#9ca3af;">→</span>
+                <span class="badge bg-secondary" style="font-size:.65rem;">${t.to_state}</span>
+                <span class="if-num">${t.count_window}</span>
+            </div>`).join('');
 }
 
 async function fetchData(updateLive) {
     try {
-        const r = await fetch(`/api/prometheus_stats?window=${selectedWindow}`);
+        const params = new URLSearchParams({ window: String(selectedWindow) });
+        if (selectedDep !== ALL_TAB) params.set('served_model_name', selectedDep);
+        const r = await fetch('/api/prometheus_stats?' + params.toString());
         const d = await r.json();
         if (d.error) {
             document.getElementById('error-msg').textContent = 'Error: ' + d.error;

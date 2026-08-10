@@ -347,6 +347,7 @@ impl RouterManager {
         WorkerInfo {
             id: id.to_string(),
             url: worker.url().to_string(),
+            instance_id: worker.instance().to_string(),
             model_id: worker.model_id().to_string(),
             priority: worker.priority(),
             cost: worker.cost(),

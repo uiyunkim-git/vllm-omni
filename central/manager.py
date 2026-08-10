@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import uuid
 import subprocess
 import httpx
@@ -455,19 +456,53 @@ class CentralManager:
             for task in tasks:
                 task.cancel()
 
+    # Retry budget shared by every register attempt: keep trying for ~30 min,
+    # then give up. Used to recover from cases like central booting while the
+    # router is still warming up (sync_p2c_workers would otherwise fail-fast
+    # and the healthy-state cache would never trigger a retry).
+    _P2C_REGISTER_TIMEOUT_S = 30 * 60
+    _P2C_REGISTER_MAX_BACKOFF_S = 30.0
+
     async def _p2c_register(self, host: str, port: int):
+        """Register a worker with the P2C router, retrying with exponential
+        backoff for up to 30 minutes. Returns once registration succeeds
+        (200 or "already exists") or the deadline expires. Designed to be
+        scheduled via asyncio.create_task so the caller doesn't block."""
         url = f"https://{host}:{port + 40000}"
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(f"{P2C_ROUTER_URL}/add_worker", params={"url": url}, timeout=30.0)
-            if resp.status_code == 200:
-                logger.info(f"P2C: registered {url}")
-            elif "already exists" in resp.text:
-                logger.debug(f"P2C: {url} already registered")
-            else:
-                logger.warning(f"P2C: unexpected response for {url}: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.warning(f"P2C: failed to register {url}: {e}")
+        deadline = time.time() + self._P2C_REGISTER_TIMEOUT_S
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{P2C_ROUTER_URL}/add_worker",
+                        params={"url": url},
+                        timeout=10.0,
+                    )
+                if resp.status_code == 200:
+                    suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
+                    logger.info(f"P2C: registered {url}{suffix}")
+                    return
+                if "already exists" in resp.text:
+                    logger.debug(f"P2C: {url} already registered")
+                    return
+                # 4xx other than already-exists is unlikely to recover — don't
+                # spend 30 min hammering a permanent error.
+                if 400 <= resp.status_code < 500:
+                    logger.warning(
+                        f"P2C: non-retryable {resp.status_code} for {url}: {resp.text}"
+                    )
+                    return
+                logger.debug(
+                    f"P2C: retry {attempt} for {url} got {resp.status_code} {resp.text}"
+                )
+            except Exception as e:
+                logger.debug(f"P2C: retry {attempt} for {url}: {e!r}")
+            # 2s → 4s → 8s → 16s → 30s (capped)
+            backoff = min(self._P2C_REGISTER_MAX_BACKOFF_S, 2 ** min(attempt, 4))
+            await asyncio.sleep(backoff)
+        logger.warning(f"P2C: giving up on {url} after {attempt} attempts (~30 min)")
 
     async def _p2c_deregister(self, host: str, port: int):
         url = f"https://{host}:{port + 40000}"
@@ -479,12 +514,15 @@ class CentralManager:
             logger.warning(f"P2C: failed to deregister {url}: {e}")
 
     async def sync_p2c_workers(self):
-        """Register all currently healthy deployment nodes with the P2C router."""
+        """Register all currently healthy deployment nodes with the P2C router.
+        Registration runs as fire-and-forget background tasks because each one
+        will retry for up to 30 minutes — awaiting them serially would block
+        startup behind every flaky network/router-warmup case."""
         deps = self.load_deployments()
         for dep in deps:
             for node in dep.get("nodes", []):
                 if node.get("is_healthy"):
-                    await self._p2c_register(node["host"], node["port"])
+                    asyncio.create_task(self._p2c_register(node["host"], node["port"]))
 
     async def _check_node_ready(self, client, host: int, api_port: int, dep: dict) -> bool:
         """Liveness + readiness check.
@@ -523,28 +561,64 @@ class CentralManager:
 
         return True
 
+    async def _node_serves_other_model(self, client, host: int, api_port: int, expected: str) -> Optional[str]:
+        """Return the served model id if the endpoint is alive but exposes a DIFFERENT
+        model than this deployment expects. Returns None if it serves the expected model
+        or if we can't tell."""
+        try:
+            resp = await client.get(f"https://{host}:{api_port}/v1/models", timeout=5.0)
+            if resp.status_code != 200:
+                return None
+            ids = [m.get("id") for m in resp.json().get("data", [])]
+            if not ids:
+                return None
+            if expected and expected not in ids:
+                return ids[0]
+        except Exception:
+            return None
+        return None
+
     async def run_health_checks(self):
         deps = self.load_deployments()
         changed = False
 
-        # Deduplicate health check targets: same host:port only checked once
-        checked_endpoints: dict = {}  # (host, port) -> bool
+        # Deduplicate health check targets: same host:port:served_model only checked once.
+        # Including served_model in the key matters when an endpoint has been re-used by a
+        # new deployment serving a different model — otherwise the cache hit from the old
+        # deployment's failed check would keep the new deployment stuck.
+        checked_endpoints: dict = {}  # (host, port, served_model) -> bool
+
+        # Track stale nodes to prune from deployments. A node is stale when its endpoint
+        # is alive but now serves a different model than this deployment expects — the
+        # endpoint has been "recycled" by another deployment.
+        stale_nodes: list = []  # list of (dep_idx, node_idx)
 
         async with httpx.AsyncClient(verify=False) as client:
-            for dep in deps:
+            for dep_idx, dep in enumerate(deps):
                 if dep["status"] not in ["running", "starting"]:
                     continue
 
+                served_name = dep.get("served_model_name") or dep.get("model", "")
                 all_healthy = True
-                for node in dep.get("nodes", []):
+                for node_idx, node in enumerate(dep.get("nodes", [])):
                     host = node["host"]
                     api_port = node["port"] + 40000
-                    endpoint_key = (host, api_port)
+                    endpoint_key = (host, api_port, served_name)
 
                     if endpoint_key not in checked_endpoints:
-                        checked_endpoints[endpoint_key] = await self._check_node_ready(
-                            client, host, api_port, dep
-                        )
+                        # If endpoint serves a different model now, mark stale and skip the rest.
+                        other = await self._node_serves_other_model(client, host, api_port, served_name)
+                        if other is not None:
+                            logger.info(
+                                f"Node {host}:{api_port} now serves {other!r}, not {served_name!r} "
+                                f"(deployment {dep['id']}) — marking stale for cleanup"
+                            )
+                            stale_nodes.append((dep_idx, node_idx))
+                            checked_endpoints[endpoint_key] = False
+                        else:
+                            checked_endpoints[endpoint_key] = await self._check_node_ready(
+                                client, host, api_port, dep
+                            )
 
                     is_healthy = checked_endpoints[endpoint_key]
 
@@ -562,7 +636,10 @@ class CentralManager:
                         if not node.get("is_healthy"):
                             node["is_healthy"] = True
                             changed = True
-                            await self._p2c_register(host, node["port"])
+                            # Fire-and-forget — _p2c_register internally retries
+                            # for up to 30 min so we don't want to block the
+                            # health-check loop on a single slow registration.
+                            asyncio.create_task(self._p2c_register(host, node["port"]))
                         node["_fail_count"] = 0
 
                     if not node.get("is_healthy"):
@@ -571,6 +648,20 @@ class CentralManager:
                 if all_healthy and dep["status"] == "starting":
                     dep["status"] = "running"
                     changed = True
+
+        # Prune stale nodes (endpoint now serves a different model — its slot was reused).
+        # Walk indices in reverse so deletion doesn't shift remaining positions.
+        if stale_nodes:
+            changed = True
+            for dep_idx, node_idx in sorted(stale_nodes, reverse=True):
+                if dep_idx < len(deps) and node_idx < len(deps[dep_idx].get("nodes", [])):
+                    bad = deps[dep_idx]["nodes"].pop(node_idx)
+                    logger.info(f"Pruned stale node {bad.get('name')} from deployment {deps[dep_idx]['id']}")
+                    # Best-effort deregister from P2C; harmless if already gone.
+                    try:
+                        await self._p2c_deregister(bad["host"], bad["port"])
+                    except Exception:
+                        pass
 
         if changed:
             self.save_deployments(deps)

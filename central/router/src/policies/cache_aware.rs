@@ -217,9 +217,11 @@ impl CacheAwarePolicy {
         }
 
         // Increment processed counter
-        workers[min_load_idx].increment_processed();
-        RouterMetrics::record_processed_request(workers[min_load_idx].url());
-        RouterMetrics::record_policy_decision(self.name(), workers[min_load_idx].url());
+        let __sel = workers[min_load_idx].as_ref();
+
+        __sel.increment_processed();
+
+        RouterMetrics::record_policy_decision(self.name(), __sel.url(), __sel.instance());
 
         Some(min_load_idx)
     }
@@ -290,9 +292,13 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             let random_idx = rng.random_range(0..healthy_indices.len());
             let selected_idx = healthy_indices[random_idx];
 
-            workers[selected_idx].increment_processed();
-            RouterMetrics::record_processed_request(workers[selected_idx].url());
-            RouterMetrics::record_policy_decision(self.name(), workers[selected_idx].url());
+            let __sel = workers[selected_idx].as_ref();
+
+
+            __sel.increment_processed();
+
+
+            RouterMetrics::record_policy_decision(self.name(), __sel.url(), __sel.instance());
 
             return Some(selected_idx);
         };
@@ -331,9 +337,11 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             tree.insert(text, workers[idx].url());
 
             // Increment processed counter
-            workers[idx].increment_processed();
-            RouterMetrics::record_processed_request(workers[idx].url());
-            RouterMetrics::record_policy_decision(self.name(), workers[idx].url());
+            let __sel = workers[idx].as_ref();
+
+            __sel.increment_processed();
+
+            RouterMetrics::record_policy_decision(self.name(), __sel.url(), __sel.instance());
 
             return Some(idx);
         }
@@ -347,9 +355,11 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
         // Fallback to first healthy worker
         if let Some(idx) = healthy_indices.first().copied() {
-            workers[idx].increment_processed();
-            RouterMetrics::record_processed_request(workers[idx].url());
-            RouterMetrics::record_policy_decision(self.name(), workers[idx].url());
+            let __sel = workers[idx].as_ref();
+
+            __sel.increment_processed();
+
+            RouterMetrics::record_policy_decision(self.name(), __sel.url(), __sel.instance());
 
             Some(idx)
         } else {

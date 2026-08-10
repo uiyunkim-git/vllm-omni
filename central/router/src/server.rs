@@ -563,6 +563,7 @@ async fn list_workers_rest(
             "workers": workers.iter().map(|worker| {
                 let mut worker_info = serde_json::json!({
                     "url": worker.url(),
+                    "instance_id": worker.instance(),
                     "model_id": worker.model_id(),
                     "worker_type": match worker.worker_type() {
                         WorkerType::Regular => "regular",

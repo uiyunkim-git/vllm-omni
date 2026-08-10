@@ -33,10 +33,9 @@ impl LoadBalancingPolicy for RandomPolicy {
 
         let mut rng = rand::rng();
         let random_idx = rng.random_range(0..healthy_indices.len());
-        let worker = workers[healthy_indices[random_idx]].url();
+        let selected = workers[healthy_indices[random_idx]].as_ref();
 
-        RouterMetrics::record_processed_request(worker);
-        RouterMetrics::record_policy_decision(self.name(), worker);
+        RouterMetrics::record_policy_decision(self.name(), selected.url(), selected.instance());
         Some(healthy_indices[random_idx])
     }
 

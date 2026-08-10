@@ -1,5 +1,148 @@
 {% extends 'base.html' %}
 
+{% block extra_styles %}
+<style>
+.gw-deploy-group {
+    margin-bottom: 1.5rem;
+}
+.gw-group-head {
+    font-size: .72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #6b7280;
+    padding: 0 .35rem .4rem;
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+}
+.gw-group-head .badge { font-weight: 500; font-size: .62rem; }
+.gw-deploy-row {
+    display: flex;
+    flex-direction: column;
+    gap: .15rem;
+    padding: .65rem .8rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-bottom: .4rem;
+    transition: border-color .12s, background .12s;
+}
+.gw-deploy-row:hover { border-color: #93c5fd; background: #f8fafc; }
+.gw-deploy-row.selected { border-color: #2563eb; background: #eff6ff; }
+.gw-deploy-name { font-weight: 600; color: #111827; font-size: .88rem; }
+.gw-deploy-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: .5rem;
+    font-size: .72rem;
+    color: #6b7280;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gw-deploy-status {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #10b981;
+    margin-right: .35rem;
+}
+.gw-deploy-status.unhealthy { background: #ef4444; }
+
+.gw-tab-buttons {
+    display: flex;
+    gap: .25rem;
+    border-bottom: 1px solid #e5e7eb;
+    margin-bottom: 0;
+}
+.gw-tab-btn {
+    background: transparent;
+    border: none;
+    padding: .5rem .85rem;
+    font-size: .78rem;
+    font-weight: 500;
+    color: #6b7280;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    margin-bottom: -1px;
+}
+.gw-tab-btn:hover { color: #1f2937; }
+.gw-tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
+.gw-code-block {
+    background: #0f172a;
+    color: #d1fae5;
+    border-radius: 0 0 10px 10px;
+    padding: 1rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    white-space: pre;
+    overflow-x: auto;
+    margin: 0;
+    border: 1px solid #1e293b;
+    border-top: none;
+}
+.gw-copy-btn {
+    position: absolute;
+    top: .55rem;
+    right: .55rem;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.15);
+    color: #cbd5e1;
+    border-radius: 6px;
+    font-size: .7rem;
+    padding: .2rem .55rem;
+    cursor: pointer;
+}
+.gw-copy-btn:hover { background: rgba(255,255,255,.15); color: #fff; }
+
+.gw-test-grid {
+    display: grid;
+    grid-template-columns: 1fr 120px 120px;
+    gap: .75rem;
+    margin-bottom: .75rem;
+}
+.gw-progress-track {
+    width: 100%;
+    height: 8px;
+    background: #f3f4f6;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: .5rem;
+}
+.gw-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #60a5fa, #2563eb);
+    border-radius: 4px;
+    transition: width .15s ease;
+    width: 0;
+}
+.gw-progress-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: .72rem;
+    color: #6b7280;
+    margin-top: .35rem;
+    font-variant-numeric: tabular-nums;
+}
+.gw-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: .5rem;
+    margin-top: .65rem;
+}
+.gw-stat {
+    background: #f9fafb;
+    padding: .45rem .6rem;
+    border-radius: 6px;
+}
+.gw-stat-label { font-size: .65rem; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+.gw-stat-val { font-size: .95rem; font-weight: 600; font-variant-numeric: tabular-nums; color: #111827; }
+.gw-stat-val.success { color: #059669; }
+.gw-stat-val.fail    { color: #dc2626; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="d-flex align-items-center mb-4">
     <i class="fa-solid fa-server me-2 text-secondary"></i>
@@ -10,54 +153,84 @@
 </div>
 
 <div class="row g-4">
-
-    <!-- Left: Active Models -->
-    <div class="col-md-4">
-        <div class="section-title"><i class="fa-solid fa-cubes me-1"></i>Active Models</div>
-        <div class="card table-card">
-            <ul class="list-group list-group-flush" id="gateway-models-list">
-                <li class="list-group-item text-muted small">Loading models...</li>
-            </ul>
+    <!-- Left: deployments grouped by endpoint type -->
+    <div class="col-lg-4">
+        <div class="section-title"><i class="fa-solid fa-cubes me-1"></i>Deployments</div>
+        <div id="gw-deployments-list">
+            <div class="text-muted small">Loading…</div>
         </div>
     </div>
 
-    <!-- Right: cURL + Test -->
-    <div class="col-md-8">
-
-        <!-- cURL example -->
+    <!-- Right: examples + tester -->
+    <div class="col-lg-8">
         <div class="section-title">
-            <i class="fa-solid fa-code me-1"></i>Example Request (cURL)
-            <span class="ms-2 fw-normal text-secondary font-monospace" id="gateway-proxy-info" style="text-transform:none;letter-spacing:0">Proxy at: Pending...</span>
+            <i class="fa-solid fa-code me-1"></i>Example Request
+            <span class="ms-2 fw-normal text-secondary font-monospace" id="gw-proxy-info" style="text-transform:none;letter-spacing:0">Proxy at: —</span>
         </div>
-        <div class="card mb-4" style="border-color:#334155">
-            <div class="card-body bg-dark rounded p-3" style="border-radius:10px">
-                <pre class="mb-0 text-success" style="font-size:0.83rem;white-space:pre-wrap;word-break:break-all" id="gateway-curl-example"># Select a model from the left to generate a cURL command</pre>
+
+        <!-- Tabbed code examples -->
+        <div class="card mb-4" id="gw-example-card" style="display:none">
+            <div class="card-body p-0">
+                <div class="px-3 pt-2" style="position:relative">
+                    <div class="gw-tab-buttons">
+                        <button class="gw-tab-btn active" data-lang="curl" onclick="gwSelectExampleTab('curl')">cURL</button>
+                        <button class="gw-tab-btn" data-lang="python" onclick="gwSelectExampleTab('python')">Python</button>
+                    </div>
+                </div>
+                <div style="position:relative">
+                    <button class="gw-copy-btn" onclick="gwCopyExample()"><i class="fa-regular fa-copy me-1"></i>Copy</button>
+                    <pre class="gw-code-block" id="gw-example-code"># Select a deployment from the left.</pre>
+                </div>
             </div>
         </div>
 
-        <!-- Test panel -->
-        <div id="gateway-test-card" style="display:none">
-            <div class="section-title"><i class="fa-solid fa-flask me-1"></i>Test Endpoint</div>
+        <!-- Tester -->
+        <div id="gw-test-card" style="display:none">
+            <div class="section-title"><i class="fa-solid fa-flask me-1"></i>Test endpoint</div>
             <div class="card">
                 <div class="card-body">
-                    <div class="row g-3 mb-3">
-                        <div class="col-md-9">
-                            <label class="form-label small fw-semibold mb-1">
-                                Prompt
-                                <span class="text-primary font-monospace fw-normal ms-1" id="gateway-test-model-name"></span>
-                            </label>
-                            <textarea class="form-control font-monospace" id="gateway-test-prompt" rows="3">Hello, can you introduce yourself?</textarea>
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold mb-1">
+                            Input
+                            <span class="text-primary font-monospace fw-normal ms-1" id="gw-test-model"></span>
+                        </label>
+                        <textarea class="form-control font-monospace" id="gw-test-input" rows="3">Hello, can you introduce yourself?</textarea>
+                    </div>
+                    <div class="gw-test-grid">
+                        <div></div>
+                        <div>
+                            <label class="form-label small fw-semibold mb-1">Total requests</label>
+                            <input type="number" class="form-control form-control-sm" id="gw-test-total" value="20" min="1" max="10000">
                         </div>
-                        <div class="col-md-3">
-                            <label class="form-label small fw-semibold mb-1">Concurrent Requests</label>
-                            <input type="number" class="form-control" id="gateway-test-concurrency" value="5" min="1" max="50">
+                        <div>
+                            <label class="form-label small fw-semibold mb-1">Concurrency</label>
+                            <input type="number" class="form-control form-control-sm" id="gw-test-concurrency" value="5" min="1" max="500">
                         </div>
                     </div>
-                    <button class="btn btn-sm btn-primary w-100 mb-3" onclick="testGatewayEndpoint()" id="gateway-test-btn">
-                        <i class="fa-solid fa-paper-plane me-2"></i>Send Request(s)
-                    </button>
-                    <div class="p-2 bg-light border rounded" style="min-height:80px;max-height:300px;overflow-y:auto">
-                        <pre class="mb-0 small font-monospace text-wrap" id="gateway-test-response">Response will appear here...</pre>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary flex-grow-1" onclick="gwRunTest()" id="gw-test-btn">
+                            <i class="fa-solid fa-paper-plane me-2"></i>Send requests
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="gwAbortTest()" id="gw-test-abort" disabled>
+                            <i class="fa-solid fa-stop me-2"></i>Stop
+                        </button>
+                    </div>
+
+                    <div class="gw-progress-track"><div class="gw-progress-fill" id="gw-progress-bar"></div></div>
+                    <div class="gw-progress-meta">
+                        <span id="gw-progress-text">Ready</span>
+                        <span id="gw-progress-rps"></span>
+                    </div>
+
+                    <div class="gw-stat-grid">
+                        <div class="gw-stat"><div class="gw-stat-label">Sent</div><div class="gw-stat-val" id="gw-stat-sent">0</div></div>
+                        <div class="gw-stat"><div class="gw-stat-label">Success</div><div class="gw-stat-val success" id="gw-stat-success">0</div></div>
+                        <div class="gw-stat"><div class="gw-stat-label">Failed</div><div class="gw-stat-val fail" id="gw-stat-fail">0</div></div>
+                        <div class="gw-stat"><div class="gw-stat-label">Avg latency</div><div class="gw-stat-val" id="gw-stat-latency">—</div></div>
+                    </div>
+
+                    <div class="p-2 bg-light border rounded mt-3" style="max-height:280px;overflow-y:auto">
+                        <pre class="mb-0 small font-monospace text-wrap" id="gw-test-response">Last response will appear here…</pre>
                     </div>
                 </div>
             </div>

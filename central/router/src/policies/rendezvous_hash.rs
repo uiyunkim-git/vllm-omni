@@ -64,15 +64,17 @@ impl LoadBalancingPolicy for RendezvousHashPolicy {
             .copied()
             .unwrap();
 
-        let worker_url = workers[selected_idx].url();
+        let __sel = workers[selected_idx].as_ref();
+
+
+        let worker_url = __sel.url();
         info!(
             "Rendezvous hash routing: key='{}' -> worker='{}' (index={})",
             hash_key, worker_url, selected_idx
         );
 
         workers[selected_idx].increment_processed();
-        RouterMetrics::record_processed_request(worker_url);
-        RouterMetrics::record_policy_decision(self.name(), worker_url);
+        RouterMetrics::record_policy_decision(self.name(), worker_url, __sel.instance());
 
         Some(selected_idx)
     }

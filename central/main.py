@@ -173,17 +173,23 @@ def _parse_prometheus_full(text: str) -> dict:
 
 from collections import deque
 
-_BUFFER_SECONDS_MAX = 24 * 60 * 60  # keep 24h of samples on the server
+_BUFFER_SECONDS_MAX = 6 * 60 * 60  # keep 6h of samples per series. Capping at 6h
+                                   # keeps per-series buffers around 4.3k entries
+                                   # (vs ~17k at 24h), which made linear scans in
+                                   # _window_delta and latency-bucket aggregation
+                                   # noticeably slow once we hit ~40 workers.
 # Single, unified window vocabulary shared by cards / per-worker bars / RPS chart.
-_ALLOWED_WINDOWS = [900, 3600, 6 * 3600, 12 * 3600, 24 * 3600]  # 15m, 1h, 6h, 12h, 24h
+_ALLOWED_WINDOWS = [30, 60, 300, 900, 3600, 6 * 3600]  # 30s, 1m, 5m, 15m, 1h, 6h
 _ALLOWED_HISTORY = _ALLOWED_WINDOWS  # alias, used by rps_history endpoint
 _metric_history: Dict[str, deque] = {}  # key -> deque[(ts, value)]
 
 
 def _push_sample(key: str, ts: float, val: float) -> deque:
     dq = _metric_history.setdefault(key, deque())
-    # Detect Prometheus counter reset (e.g. router restart): the counter went backwards.
-    # All older samples are meaningless for windowed rate calc, so drop them.
+    # Counters are monotonic — any drop means a real reset (router restart).
+    # Partial /metrics scrapes are filtered upstream at the cycle level (see
+    # `_required` short-circuit in _collect_metrics), so by the time we get
+    # here, a drop is trustworthy.
     if dq and val < dq[-1][1]:
         dq.clear()
     dq.append((ts, val))
@@ -194,12 +200,27 @@ def _push_sample(key: str, ts: float, val: float) -> deque:
 
 
 def _window_delta(key: str, window_s: int):
-    """Return (delta, duration_s) for samples in the last `window_s` seconds, or None."""
+    """Return (delta, duration_s) for samples in the last `window_s` seconds, or None.
+
+    The window is anchored to wall-clock `now`, NOT to the last sample's
+    timestamp. This matters after a router restart: a worker that processed
+    requests before the restart but none after stops being scraped (a counter
+    that never increments post-reset is not even emitted by Prometheus), so its
+    deque freezes with the old cumulative value. Anchoring the cutoff to the
+    last sample would then report that entire historical climb as if it
+    happened in the last `window_s` seconds — producing absurd RPS spikes on
+    the windowed cards. Anchoring to `now` (and treating a stale series as no
+    activity) correctly reports 0 once the series stops updating.
+    """
     dq = _metric_history.get(key)
     if not dq or len(dq) < 2:
         return None
+    now = time.time()
+    cutoff = now - window_s
     newest_ts, newest_val = dq[-1]
-    cutoff = newest_ts - window_s
+    # Series hasn't updated within the window → nothing happened recently.
+    if newest_ts < cutoff:
+        return None
     oldest_ts, oldest_val = None, None
     for ts, val in dq:
         if ts >= cutoff:
@@ -212,77 +233,222 @@ def _window_delta(key: str, window_s: int):
     return delta, duration
 
 
-@app.get("/api/prometheus_stats")
-async def get_prometheus_stats(window: int = 900):
-    # Clamp to allowed values; pick nearest if caller sends something odd
-    if window not in _ALLOWED_WINDOWS:
-        window = min(_ALLOWED_WINDOWS, key=lambda x: abs(x - window))
+# ──────────────────────────────────────────────────────────────────────────
+# Background metric collection.
+#
+# Previously /api/prometheus_stats both *scraped* the router and *served* the
+# response, which meant nothing got into the ring buffers unless somebody had
+# the metrics page open. That made the chart look like it was "ramping up from
+# zero" every time a user opened it — because for that user, recent history
+# really was empty. Now a single background task scrapes every 5s regardless
+# of whether anyone is watching, and the endpoint just reads the snapshot it
+# leaves behind.
+# ──────────────────────────────────────────────────────────────────────────
+_latest_scrape: dict = {}
+_SCRAPE_PERIOD_S = 5.0
+
+async def _collect_metrics():
+    """One scrape cycle. Fetch /metrics + /workers, push samples to ring
+    buffers, and update `_latest_scrape` for the API layer to read."""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get("http://143.248.74.105:29000/metrics", timeout=3.0)
             text = resp.text
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        return
 
     raw = _parse_prometheus_full(text)
     now = time.time()
 
+    # Partial-scrape guard: if any core series is missing we'd interpret it as
+    # a counter reset and blow away the ring buffers. Skip the whole cycle.
+    _required = (
+        "vllm_router_requests_total",
+        "vllm_router_processed_requests_total",
+        "vllm_router_generate_duration_seconds_sum",
+        "vllm_router_generate_duration_seconds_count",
+    )
+    if not all(raw.get(k) for k in _required):
+        return
+
     active_workers = int(next((e["value"] for e in raw.get("vllm_router_active_workers", []) if not e["labels"]), 0))
 
-    processed_map = {e["labels"].get("worker", "_"): int(e["value"]) for e in raw.get("vllm_router_processed_requests_total", [])}
-    decisions_map = {e["labels"].get("worker", "_"): int(e["value"]) for e in raw.get("vllm_router_policy_decisions_total", [])}
-    running_map = {e["labels"].get("worker", "_"): int(e["value"]) for e in raw.get("vllm_router_running_requests", [])}
+    live_instances: Dict[str, str] = {}
+    try:
+        async with httpx.AsyncClient() as client:
+            wresp = await client.get("http://143.248.74.105:11434/workers", timeout=2.0)
+            for w in wresp.json().get("workers", []):
+                if w.get("url") and w.get("instance_id"):
+                    live_instances[w["url"]] = w["instance_id"]
+    except Exception:
+        pass
+
+    def _is_live(labels: dict) -> bool:
+        if not live_instances:
+            return True
+        url = labels.get("worker", "")
+        inst = labels.get("instance", "")
+        live = live_instances.get(url)
+        if live is None:
+            return False
+        if inst and inst != live:
+            return False
+        return True
+
+    def _live_map(metric_name: str) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for e in raw.get(metric_name, []):
+            if _is_live(e["labels"]):
+                out[e["labels"].get("worker", "_")] = int(e["value"])
+        return out
+
+    processed_map = _live_map("vllm_router_processed_requests_total")
+    decisions_map = _live_map("vllm_router_policy_decisions_total")
+    running_map = _live_map("vllm_router_running_requests")
 
     total_requests = sum(int(e["value"]) for e in raw.get("vllm_router_requests_total", []))
-    total_retries = sum(int(e["value"]) for e in raw.get("vllm_router_retries_total", []))
+    retries_per_worker: Dict[str, int] = {}
+    for e in raw.get("vllm_router_retries_total", []):
+        if not _is_live(e["labels"]):
+            continue
+        w = e["labels"].get("worker", "_")
+        retries_per_worker[w] = retries_per_worker.get(w, 0) + int(e["value"])
+    total_retries = sum(retries_per_worker.values())
 
-    latency_count = int(next((e["value"] for e in raw.get("vllm_router_generate_duration_seconds_count", [])), 0))
-    latency_sum = next((e["value"] for e in raw.get("vllm_router_generate_duration_seconds_sum", [])), 0.0)
+    lat_sum_per_worker: Dict[str, float] = {}
+    lat_cnt_per_worker: Dict[str, int] = {}
+    bucket_per_worker: Dict[str, Dict[str, int]] = {}
 
-    dur_buckets = raw.get("vllm_router_generate_duration_seconds_bucket", [])
-    # Cumulative bucket values right now (current scrape).
-    cum_buckets = sorted(
-        [{"le": e["labels"]["le"], "cum": int(e["value"])} for e in dur_buckets if "le" in e["labels"] and e["labels"]["le"] != "+Inf"],
-        key=lambda x: float(x["le"])
-    )
+    for e in raw.get("vllm_router_generate_duration_seconds_sum", []):
+        if not _is_live(e["labels"]):
+            continue
+        w = e["labels"].get("worker", "_")
+        lat_sum_per_worker[w] = lat_sum_per_worker.get(w, 0.0) + float(e["value"])
+    for e in raw.get("vllm_router_generate_duration_seconds_count", []):
+        if not _is_live(e["labels"]):
+            continue
+        w = e["labels"].get("worker", "_")
+        lat_cnt_per_worker[w] = lat_cnt_per_worker.get(w, 0) + int(e["value"])
+    for e in raw.get("vllm_router_generate_duration_seconds_bucket", []):
+        le = e["labels"].get("le")
+        if le is None or le == "+Inf" or not _is_live(e["labels"]):
+            continue
+        w = e["labels"].get("worker", "_")
+        bucket_per_worker.setdefault(le, {})[w] = bucket_per_worker.get(le, {}).get(w, 0) + int(e["value"])
 
-    # Push per-bucket samples to the ring buffer so we can compute window-bounded
-    # latency distributions instead of only ever-since-restart cumulative ones.
-    for b in cum_buckets:
-        _push_sample(f"bucket:{b['le']}", now, b["cum"])
-
-    # Build the histogram BOTH ways:
-    #  - cumulative (for cumulative section, if ever used)
-    #  - windowed (cum_now - cum_window_start), shown in Rolling window
-    latency_hist_cum = []
-    prev = 0
-    for b in cum_buckets:
-        latency_hist_cum.append({"le": b["le"], "count": b["cum"] - prev})
-        prev = b["cum"]
-
-    latency_hist_window = []
-    prev_w = 0.0
-    for b in cum_buckets:
-        delta = _window_delta(f"bucket:{b['le']}", window)
-        cum_w = float(delta[0]) if delta else 0.0
-        latency_hist_window.append({"le": b["le"], "count": int(max(0.0, cum_w - prev_w))})
-        prev_w = cum_w
-
-    cb_state_map = {e["labels"].get("worker", "_"): int(e["value"]) for e in raw.get("vllm_router_cb_state", [])}
+    cb_state_map = {
+        e["labels"].get("worker", "_"): int(e["value"])
+        for e in raw.get("vllm_router_cb_state", [])
+        if _is_live(e["labels"])
+    }
 
     cb_outcomes: dict = {}
     for e in raw.get("vllm_router_cb_outcomes_total", []):
+        if not _is_live(e["labels"]):
+            continue
         w = e["labels"].get("worker", "_")
         outcome = e["labels"].get("outcome", "unknown")
         cb_outcomes.setdefault(w, {})[outcome] = int(e["value"])
 
-    cb_transitions_raw = raw.get("vllm_router_cb_state_transitions_total", [])
+    cb_transitions_raw = [
+        e for e in raw.get("vllm_router_cb_state_transitions_total", [])
+        if _is_live(e["labels"])
+    ]
+
+    # Push ring-buffer samples (same logic as before, just runs unconditionally).
+    _push_sample("global:requests", now, total_requests)
+    _push_sample("global:retries", now, total_retries)
+    for w_url, s in lat_sum_per_worker.items():
+        _push_sample(f"lat_sum:{w_url}", now, s)
+    for w_url, c in lat_cnt_per_worker.items():
+        _push_sample(f"lat_cnt:{w_url}", now, c)
+    for le, by_worker in bucket_per_worker.items():
+        for w_url, cum in by_worker.items():
+            _push_sample(f"bucket:{le}:{w_url}", now, cum)
+    # Push proc samples for every worker we have a current value for. Iterating
+    # `processed_map` (post-filter) instead of `live_instances.keys()` matters:
+    # when the /workers fetch fails, live_instances is empty and `_is_live`
+    # fails open, so processed_map still gets populated — but a live_instances
+    # iteration would silently push nothing and the chart would freeze at 0
+    # despite traffic flowing.
+    for w_url, val in processed_map.items():
+        _push_sample(f"proc:{w_url}", now, val)
+    for w_url, rcnt in retries_per_worker.items():
+        _push_sample(f"retry:{w_url}", now, rcnt)
+    for w_url, oc in cb_outcomes.items():
+        _push_sample(f"cb_succ:{w_url}", now, oc.get("success", 0))
+        _push_sample(f"cb_fail:{w_url}", now, oc.get("failure", 0))
+    for e in cb_transitions_raw:
+        lbls = e["labels"]
+        key = f"cb_trans:{lbls.get('worker','_')}|{lbls.get('from','?')}|{lbls.get('to','?')}"
+        _push_sample(key, now, int(e["value"]))
+
+    # Publish snapshot for the API layer.
+    _latest_scrape.update({
+        "now": now,
+        "live_instances": live_instances,
+        "processed_map": processed_map,
+        "decisions_map": decisions_map,
+        "running_map": running_map,
+        "cb_state_map": cb_state_map,
+        "cb_outcomes": cb_outcomes,
+        "cb_transitions_raw": cb_transitions_raw,
+        "total_requests": total_requests,
+        "total_retries": total_retries,
+        "lat_sum_per_worker": lat_sum_per_worker,
+        "lat_cnt_per_worker": lat_cnt_per_worker,
+        "bucket_per_worker": bucket_per_worker,
+        "active_workers": active_workers,
+        "retries_per_worker": retries_per_worker,
+    })
+
+
+async def _scrape_loop():
+    while True:
+        try:
+            await _collect_metrics()
+        except Exception as e:
+            import sys
+            print(f"[collect] loop error: {e}", file=sys.stderr)
+        await asyncio.sleep(_SCRAPE_PERIOD_S)
+
+
+@app.get("/api/prometheus_stats")
+async def get_prometheus_stats(window: int = 900, served_model_name: Optional[str] = None):
+    # Clamp to allowed values; pick nearest if caller sends something odd
+    if window not in _ALLOWED_WINDOWS:
+        window = min(_ALLOWED_WINDOWS, key=lambda x: abs(x - window))
+
+    snap = _latest_scrape
+    if not snap:
+        return {
+            "error": "metrics still warming up",
+            "incomplete": True,
+            "timestamp": round(time.time(), 3),
+        }
+
+    now = snap["now"]
+    live_instances = snap["live_instances"]
+    processed_map = snap["processed_map"]
+    decisions_map = snap["decisions_map"]
+    running_map = snap["running_map"]
+    cb_state_map = snap["cb_state_map"]
+    cb_outcomes = snap["cb_outcomes"]
+    cb_transitions_raw = snap["cb_transitions_raw"]
+    lat_sum_per_worker = snap["lat_sum_per_worker"]
+    lat_cnt_per_worker = snap["lat_cnt_per_worker"]
+    bucket_per_worker = snap["bucket_per_worker"]
+    active_workers = snap["active_workers"]
+    total_requests = snap["total_requests"]
+    total_retries = snap["total_retries"]
+    bucket_les = sorted({le for le in bucket_per_worker.keys()}, key=lambda x: float(x))
+
+    retries_per_worker = snap["retries_per_worker"]
 
     # P2C worker URL → deployment info + worker_id, derived from Central's deployment records.
-    # Multiple workers can share a host (e.g. KBDS has 6 worker_ids on the same Tailscale IP),
-    # so host alone is not a unique key — we use (host, ext_port) → deployment.node.
+    # Built fresh per request (cheap, manager.load_deployments() is in-memory).
     url_to_dep: Dict[str, dict] = {}        # url → {id, name, served_model_name}
-    url_to_worker_id: Dict[str, str] = {}   # url → worker_id (e.g. "kbds-worker-003")
+    url_to_worker_id: Dict[str, str] = {}   # url → worker_id
     deployments: Dict[str, dict] = {}
     _worker_id_re = re.compile(r'^vllm_[^_]+_(.+)_\d+$')
     for dep in manager.load_deployments():
@@ -304,6 +470,44 @@ async def get_prometheus_stats(window: int = 900):
                 url_to_worker_id[url] = m.group(1)
             deployments[dep_key]["worker_urls"].append(url)
 
+    # Resolve target worker set for this request: either the deployment's workers
+    # (filtered by served_model_name) or every live worker (the unfiltered global view).
+    if served_model_name:
+        target_urls = {
+            u for u, info in url_to_dep.items()
+            if info.get("served_model_name") == served_model_name
+        }
+    else:
+        target_urls = set(lat_cnt_per_worker.keys()) | set(lat_sum_per_worker.keys())
+
+    # Cumulative sum/count over the chosen target workers.
+    latency_sum = sum(lat_sum_per_worker.get(u, 0.0) for u in target_urls)
+    latency_count = sum(lat_cnt_per_worker.get(u, 0) for u in target_urls)
+
+    # Cumulative histogram (current scrape, aggregated over target workers).
+    cum_buckets = []
+    for le in bucket_les:
+        cum = sum(bucket_per_worker.get(le, {}).get(u, 0) for u in target_urls)
+        cum_buckets.append({"le": le, "cum": cum})
+
+    latency_hist_cum = []
+    prev = 0
+    for b in cum_buckets:
+        latency_hist_cum.append({"le": b["le"], "count": b["cum"] - prev})
+        prev = b["cum"]
+
+    # Windowed histogram: sum per-worker bucket deltas across target workers.
+    latency_hist_window = []
+    prev_w = 0.0
+    for le in bucket_les:
+        cum_w = 0.0
+        for u in target_urls:
+            d = _window_delta(f"bucket:{le}:{u}", window)
+            if d:
+                cum_w += float(d[0])
+        latency_hist_window.append({"le": le, "count": int(max(0.0, cum_w - prev_w))})
+        prev_w = cum_w
+
     # Fallback host→name map (only used when we don't have a deployment record for the URL)
     host_to_name: Dict[str, str] = {}
     for wid, w in manager.get_workers().items():
@@ -317,13 +521,7 @@ async def get_prometheus_stats(window: int = 900):
         wid = url_to_worker_id.get(url) or host_to_name.get(host, host)
         return f"{wid}:{port}"
 
-    # Record 15-min ring-buffer samples
-    _push_sample("global:requests", now, total_requests)
-    _push_sample("global:retries", now, total_retries)
-    _push_sample("global:latency_sum", now, latency_sum)
-    _push_sample("global:latency_count", now, latency_count)
-    for w_url, proc in processed_map.items():
-        _push_sample(f"proc:{w_url}", now, proc)
+    # (Ring-buffer pushes happen in _collect_metrics() — this endpoint is read-only.)
 
     all_workers = sorted(set(list(processed_map.keys()) + list(decisions_map.keys()) + list(running_map.keys())))
     per_worker = []
@@ -333,6 +531,8 @@ async def get_prometheus_stats(window: int = 900):
         outcomes = cb_outcomes.get(w, {})
         dep_info = url_to_dep.get(w, {})
         proc_window = _window_delta(f"proc:{w}", window)
+        succ_w = _window_delta(f"cb_succ:{w}", window)
+        fail_w = _window_delta(f"cb_fail:{w}", window)
         per_worker.append({
             "url": w,
             "name": _friendly_name(w),
@@ -346,31 +546,63 @@ async def get_prometheus_stats(window: int = 900):
             "cb_state": cb_state_map.get(w, -1),
             "cb_success": outcomes.get("success", 0),
             "cb_failure": outcomes.get("failure", 0),
+            "cb_success_window": int(succ_w[0]) if succ_w else 0,
+            "cb_failure_window": int(fail_w[0]) if fail_w else 0,
         })
 
-    # Windowed aggregates (driven by ?window=)
-    requests_w = _window_delta("global:requests", window)
-    retries_w  = _window_delta("global:retries", window)
-    lat_sum_w  = _window_delta("global:latency_sum", window)
-    lat_cnt_w  = _window_delta("global:latency_count", window)
+    # Windowed aggregates driven by ?window= and the served_model_name filter.
+    # Sum per-worker windowed delta AND track the matching duration from the
+    # same series — using a mismatched (e.g. global) denominator produced cards
+    # that disagreed with the chart by a factor of 2-3x.
+    requests_window_total = 0
+    duration_w = 0.0
+    for u in target_urls:
+        pd = _window_delta(f"proc:{u}", window)
+        if pd:
+            requests_window_total += int(pd[0])
+            duration_w = max(duration_w, pd[1])
+    if duration_w <= 0:
+        duration_w = float(window)
+    rps_window = requests_window_total / duration_w
 
-    rps_window = (requests_w[0] / requests_w[1]) if requests_w else None
-    requests_window_total = int(requests_w[0]) if requests_w else 0
-    retries_window_total  = int(retries_w[0]) if retries_w else 0
-    retry_rate_window     = (retries_window_total / requests_window_total * 100) if requests_window_total > 0 else 0
-    avg_latency_window    = (lat_sum_w[0] / lat_cnt_w[0]) if lat_sum_w and lat_cnt_w and lat_cnt_w[0] > 0 else 0
+    retries_window_total = 0
+    for u in target_urls:
+        rd = _window_delta(f"retry:{u}", window)
+        if rd:
+            retries_window_total += int(rd[0])
+    retry_rate_window = (retries_window_total / requests_window_total * 100) if requests_window_total > 0 else 0
 
-    cb_transitions = [
-        {
-            "worker": e["labels"].get("worker", "_"),
-            "name": _friendly_name(e["labels"].get("worker", "_")),
-            "deployment_id": url_to_dep.get(e["labels"].get("worker", "_"), {}).get("id"),
-            "from_state": e["labels"].get("from", "?"),
-            "to_state": e["labels"].get("to", "?"),
-            "count": int(e["value"]),
-        }
-        for e in cb_transitions_raw
-    ]
+    # Per-worker latency deltas summed across target_urls — respects served_model_name filter.
+    lat_sum_window = 0.0
+    lat_cnt_window = 0
+    for u in target_urls:
+        ds = _window_delta(f"lat_sum:{u}", window)
+        dc = _window_delta(f"lat_cnt:{u}", window)
+        if ds:
+            lat_sum_window += float(ds[0])
+        if dc:
+            lat_cnt_window += int(dc[0])
+    avg_latency_window = (lat_sum_window / lat_cnt_window) if lat_cnt_window > 0 else 0
+
+    cb_transitions = []
+    for e in cb_transitions_raw:
+        lbls = e["labels"]
+        worker_url = lbls.get("worker", "_")
+        frm = lbls.get("from", "?")
+        to = lbls.get("to", "?")
+        tw = _window_delta(f"cb_trans:{worker_url}|{frm}|{to}", window)
+        win_cnt = int(tw[0]) if tw else 0
+        if win_cnt == 0:
+            continue   # only show transitions that actually happened in the window
+        cb_transitions.append({
+            "worker": worker_url,
+            "name": _friendly_name(worker_url),
+            "deployment_id": url_to_dep.get(worker_url, {}).get("id"),
+            "from_state": frm,
+            "to_state": to,
+            "count": int(e["value"]),       # cumulative (kept for tooltip / hover)
+            "count_window": win_cnt,        # transitions in selected rolling window
+        })
 
     return {
         "timestamp": round(now, 3),
@@ -417,9 +649,28 @@ async def get_rps_history(window: int = 3600, served_model_name: Optional[str] =
     now = time.time()
     cutoff = now - window
 
+    # Bucket size has to be at least the scrape interval (frontend polls every
+    # 5s) — otherwise some buckets randomly land between two samples and inherit
+    # the previous bucket's rate via carry-forward, producing visible step/plateau
+    # artefacts on what should be a continuous line.
+    _SCRAPE_INTERVAL = 5.0
+    target_points = max(2, min(360, int(window / _SCRAPE_INTERVAL)))
+    bucket_size = window / target_points
+
+    # buffer_too_short=True means the ring buffer does not extend back far enough
+    # to cover the full window (typical right after a central restart). When that
+    # holds we draw a flat 0 line across the no-data region so the chart's x-axis
+    # always equals [now-window, now], no matter how much history is available.
+    # Build per-series cumulative-count timelines. Global view uses the single
+    # vllm_router_requests_total series; deployment-filtered view uses each
+    # matching worker's proc:{url} series (summed at bucket boundaries below).
+    series_list: list[list[tuple]] = []  # list of (ts, cum) sequences
     if not served_model_name and not deployment:
         dq = _metric_history.get("global:requests")
-        samples = [(ts, val) for ts, val in (dq or []) if ts >= cutoff]
+        if dq:
+            filtered = [(ts, val) for ts, val in dq if ts >= cutoff]
+            if filtered:
+                series_list.append(filtered)
     else:
         worker_urls = []
         for dep in manager.load_deployments():
@@ -431,52 +682,63 @@ async def get_rps_history(window: int = 3600, served_model_name: Optional[str] =
                     worker_urls.append(f'https://{node["host"]}:{node["port"] + 40000}')
         if not worker_urls:
             return {"window_seconds": window, "samples": [], "allowed": _ALLOWED_HISTORY}
-        # Merge ring buffers by timestamp using a per-second-level approximation
-        # (we sum the closest sample per timestamp from each worker's series).
-        per_worker = []
         for u in worker_urls:
             dq = _metric_history.get(f"proc:{u}")
-            if dq:
-                per_worker.append([(ts, val) for ts, val in dq if ts >= cutoff])
-        if not per_worker:
-            return {"window_seconds": window, "samples": [], "allowed": _ALLOWED_HISTORY}
-        # Build a sorted union of timestamps, sum the latest-known per-worker value at each ts.
-        ts_set = sorted({ts for series in per_worker for ts, _ in series})
-        # Walking pointers per worker to find the latest value <= ts
-        idxs = [0] * len(per_worker)
-        last_vals = [0] * len(per_worker)
-        samples = []
-        for ts in ts_set:
-            for i, series in enumerate(per_worker):
-                while idxs[i] < len(series) and series[idxs[i]][0] <= ts:
-                    last_vals[i] = series[idxs[i]][1]
-                    idxs[i] += 1
-            samples.append((ts, sum(last_vals)))
+            if not dq:
+                continue
+            filtered = [(ts, val) for ts, val in dq if ts >= cutoff]
+            if not filtered:
+                continue
+            series_list.append(filtered)
 
-    if len(samples) < 2:
+    if not series_list:
         return {"window_seconds": window, "samples": [], "allowed": _ALLOWED_HISTORY}
 
-    # Downsample to ~360 buckets for any window
-    target_points = 360
-    bucket_size = window / target_points
+    # Chart x-axis is always rolling: [now - window, now]. When some workers
+    # have buffers shorter than the window, the bucket walker handles them via
+    # the first-observed-value carry-forward in last_vals, so partial buffers
+    # contribute zero delta for the period before they were seen — no anchor
+    # mode is needed and the chart slides as time advances.
+    x_min = cutoff
+    x_max = now
+
+    # Per-worker rate: (Δcum / Δt) at each consecutive sample pair. Each rate
+    # represents the average growth across that specific interval — robust to
+    # irregular pushes because every rate is already normalized by its own dt.
+    # Total RPS at a moment = sum of each worker's latest rate as of that moment.
+    worker_rates: list[list[tuple]] = []
+    for series in series_list:
+        rates = []
+        for j in range(1, len(series)):
+            ts_a, val_a = series[j-1]
+            ts_b, val_b = series[j]
+            dt = ts_b - ts_a
+            if dt > 0:
+                rates.append((ts_b, max(0.0, (val_b - val_a) / dt)))
+        worker_rates.append(rates)
+
+    # Seed last_rates with each worker's FIRST computed rate. Without this seed
+    # the leftmost buckets emit 0 (no rate observed yet for any worker), and
+    # the chart starts from 0 every time the page is opened. Seeding makes the
+    # entire visible range reflect "the rate when we first saw this worker",
+    # which is the best estimate we have for the period before that.
+    last_rates = [r[0][1] if r else 0.0 for r in worker_rates]
+    ptrs = [0] * len(worker_rates)
+
+    def advance_rates_to(ts_target: float) -> None:
+        for w_idx, rates in enumerate(worker_rates):
+            while ptrs[w_idx] < len(rates) and rates[ptrs[w_idx]][0] <= ts_target:
+                last_rates[w_idx] = rates[ptrs[w_idx]][1]
+                ptrs[w_idx] += 1
+
+    advance_rates_to(x_min)
 
     out = []
-    prev_ts, prev_val = samples[0]
-    next_bucket_end = prev_ts + bucket_size
-    bucket_first_ts, bucket_first_val = prev_ts, prev_val
-    for ts, val in samples[1:]:
-        if ts >= next_bucket_end:
-            # close out the previous bucket using first..last sample in the bucket
-            dt = max(1e-6, prev_ts - bucket_first_ts)
-            rate = max(0.0, (prev_val - bucket_first_val) / dt)
-            out.append({"ts": round(prev_ts, 3), "rps": round(rate, 2)})
-            bucket_first_ts, bucket_first_val = prev_ts, prev_val
-            next_bucket_end = ts + bucket_size
-        prev_ts, prev_val = ts, val
-    # last bucket
-    dt = max(1e-6, prev_ts - bucket_first_ts)
-    rate = max(0.0, (prev_val - bucket_first_val) / dt)
-    out.append({"ts": round(prev_ts, 3), "rps": round(rate, 2)})
+    for i in range(target_points):
+        b_start = x_min + i * bucket_size
+        b_end = b_start + bucket_size
+        advance_rates_to(b_end)
+        out.append({"ts": round(b_start, 3), "rps": round(sum(last_rates), 2)})
 
     return {"window_seconds": window, "samples": out, "allowed": _ALLOWED_HISTORY}
 
@@ -567,13 +829,14 @@ async def download_worker_model(worker_id: str, request: Request):
     worker = workers[worker_id]
     body = await request.json()
     model_id = body.get("model_id", "").strip()
+    force = bool(body.get("force", False))
     if not model_id:
         raise HTTPException(status_code=400, detail="model_id field required")
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"http://{worker['host']}:{worker['port']}/api/internal/models/download",
-                json={"model_id": model_id},
+                json={"model_id": model_id, "force": force},
                 timeout=10.0
             )
             resp.raise_for_status()
@@ -638,4 +901,5 @@ async def health_check_loop():
 async def startup_event():
     asyncio.create_task(health_check_loop())
     asyncio.create_task(manager.sync_p2c_workers())
+    asyncio.create_task(_scrape_loop())
 

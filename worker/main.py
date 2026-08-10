@@ -42,6 +42,7 @@ class PullImageRequest(BaseModel):
 
 class DownloadModelRequest(BaseModel):
     model_id: str
+    force: bool = False
 
 @app.on_event("startup")
 async def startup_event():
@@ -122,7 +123,7 @@ async def list_hf_models():
 
 @app.post("/api/internal/models/download")
 async def download_model(req: DownloadModelRequest):
-    job_id = manager.start_download_job(req.model_id)
+    job_id = manager.start_download_job(req.model_id, force=req.force)
     return {"job_id": job_id}
 
 @app.get("/api/internal/models/jobs")

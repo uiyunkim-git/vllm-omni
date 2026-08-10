@@ -16,6 +16,27 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchStatus();
     setInterval(fetchStatus, 5000);
 
+    // Stop the view from jumping when a GPU card is clicked: the hidden Bootstrap
+    // .btn-check input gets focus on label click and the browser scrolls that
+    // clipped element into view (yanking the deploy page to the top, or the modal
+    // grid). Snapshot scroll on pointerdown, restore it right after focus moves.
+    // Listeners are on document so they survive the periodic grid rebuild.
+    let _gpuScrollSnap = null;
+    document.addEventListener('pointerdown', (e) => {
+        const grid = e.target.closest && e.target.closest('#deployGpusGrid');
+        if (grid) _gpuScrollSnap = { win: window.scrollY, grid, top: grid.scrollTop };
+    }, true);
+    document.addEventListener('focusin', (e) => {
+        if (_gpuScrollSnap && e.target.classList && e.target.classList.contains('gpu-checkbox')) {
+            const s = _gpuScrollSnap;
+            _gpuScrollSnap = null;
+            requestAnimationFrame(() => {
+                window.scrollTo(0, s.win);
+                if (s.grid) s.grid.scrollTop = s.top;
+            });
+        }
+    });
+
     if (new URLSearchParams(window.location.search).get('deployed') === '1') {
         history.replaceState({}, '', '/');
         setTimeout(() => showAlert('success', '배포가 성공적으로 시작되었습니다.'), 300);
@@ -44,7 +65,7 @@ async function fetchStatus() {
         if (document.getElementById('deployments-table-body')) renderDeployments();
         if (document.getElementById('saved-configs-container')) renderConfigs();
         if (document.getElementById('pending-endpoints-container')) renderEndpoints();
-        if (document.getElementById('gateway-models-list')) renderGateway();
+        if (document.getElementById('gw-deployments-list')) renderGateway();
     } catch (err) {
         console.error("Failed to fetch status", err);
     }
@@ -57,6 +78,10 @@ function renderGPUs() {
 
     // Save currently checked GPUs to prevent polling from erasing selections
     let selectedGpuIds = new Set();
+    // Preserve scroll so the 5s polling refresh doesn't yank the view to the top
+    // (the modal grid scrolls internally; the full deploy page scrolls the window).
+    const _prevGridScroll = gpuGrid ? gpuGrid.scrollTop : 0;
+    const _prevWinScroll = window.scrollY;
     if (gpuGrid) {
         gpuGrid.querySelectorAll('input:checked').forEach(cb => selectedGpuIds.add(cb.value));
         gpuGrid.innerHTML = '';
@@ -137,39 +162,61 @@ function renderGPUs() {
         });
     }
 
-    gpus.forEach(gpu => {
-        let memPercent = Math.min(100, Math.round((gpu.memory_used / gpu.memory_total) * 100));
+    // Deploy Page GPU Checkboxes — grouped by worker (endpoint) with a full-width
+    // header per node so endpoints are visually separated and the node name is shown
+    // in full (instead of being truncated on every card).
+    if (gpuGrid) {
+        const deployGroups = new Map();
+        gpus.forEach(gpu => {
+            if (!deployGroups.has(gpu.worker_id)) deployGroups.set(gpu.worker_id, { name: gpu.worker_name, gpus: [] });
+            deployGroups.get(gpu.worker_id).gpus.push(gpu);
+        });
+        const deploySorted = [...deployGroups.entries()].sort(([, a], [, b]) => a.name.localeCompare(b.name));
 
-        // Deploy Page GPU Checkboxes
-        if (gpuGrid) {
-            const isChecked = selectedGpuIds.has(gpu.id) ? 'checked' : '';
-            const barColor = memPercent > 85 ? '#ef4444' : memPercent > 60 ? '#f59e0b' : '#3b82f6';
-
-            // Find running deployments on this GPU
-            const runningOnGpu = deployments.filter(d =>
-                d.status === 'running' && d.gpus && d.gpus.includes(gpu.id)
-            );
-            const runningHtml = runningOnGpu.length > 0
-                ? runningOnGpu.map(d => `<div style="font-size:.72rem;color:#dc2626;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px" title="${d.name}: ${d.served_model_name || d.model}">▶ ${d.name}</div>`).join('')
-                : '';
-
+        deploySorted.forEach(([wid, grp]) => {
+            // Full-width node separator header (forces a new row in the flex-wrap grid)
             gpuGrid.innerHTML += `
-                <input type="checkbox" class="btn-check gpu-checkbox" id="gpu-btn-${gpu.id}" value="${gpu.id}" data-node="${gpu.worker_id}" autocomplete="off" onchange="validateDeployGpus()" ${isChecked}>
-                <label for="gpu-btn-${gpu.id}" class="gpu-checkbox-label">
-                    <div style="font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">GPU ${gpu.local_id}</div>
-                    <div style="font-size:.78rem;color:#6b7280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${gpu.worker_name}</div>
-                    <div style="height:3px;border-radius:2px;background:#e5e7eb;margin:4px 0 2px">
-                        <div style="width:${memPercent}%;height:100%;border-radius:2px;background:${barColor}"></div>
-                    </div>
-                    <div style="font-size:.78rem;color:#9ca3af">${memPercent}%</div>
-                    ${runningHtml}
-                </label>
-            `;
-        }
-    });
+                <div style="flex:0 0 100%;width:100%;display:flex;align-items:center;gap:8px;margin-top:6px;padding:0 2px">
+                    <span class="fw-semibold" style="font-size:.8rem;color:#374151;white-space:nowrap" title="${escapeHtml(grp.name)}">${escapeHtml(grp.name)}</span>
+                    <span class="badge bg-secondary" style="font-size:.66rem">${grp.gpus.length} GPU${grp.gpus.length > 1 ? 's' : ''}</span>
+                    <div style="flex:1;height:1px;background:#d1d5db"></div>
+                </div>`;
+
+            grp.gpus.forEach(gpu => {
+                const memPercent = Math.min(100, Math.round((gpu.memory_used / gpu.memory_total) * 100));
+                const isChecked = selectedGpuIds.has(gpu.id) ? 'checked' : '';
+                const barColor = memPercent > 85 ? '#ef4444' : memPercent > 60 ? '#f59e0b' : '#3b82f6';
+
+                // Find running deployments on this GPU
+                const runningOnGpu = deployments.filter(d =>
+                    d.status === 'running' && d.gpus && d.gpus.includes(gpu.id)
+                );
+                const runningHtml = runningOnGpu.length > 0
+                    ? runningOnGpu.map(d => `<div style="font-size:.72rem;color:#dc2626;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px" title="${d.name}: ${d.served_model_name || d.model}">▶ ${d.name}</div>`).join('')
+                    : '';
+
+                gpuGrid.innerHTML += `
+                    <input type="checkbox" class="btn-check gpu-checkbox" id="gpu-btn-${gpu.id}" value="${gpu.id}" data-node="${gpu.worker_id}" autocomplete="off" onchange="validateDeployGpus()" ${isChecked}>
+                    <label for="gpu-btn-${gpu.id}" class="gpu-checkbox-label" title="${escapeHtml(grp.name)} · GPU ${gpu.local_id}">
+                        <div style="font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">GPU ${gpu.local_id}</div>
+                        <div style="height:3px;border-radius:2px;background:#e5e7eb;margin:4px 0 2px">
+                            <div style="width:${memPercent}%;height:100%;border-radius:2px;background:${barColor}"></div>
+                        </div>
+                        <div style="font-size:.78rem;color:#9ca3af">${memPercent}%</div>
+                        ${runningHtml}
+                    </label>
+                `;
+            });
+        });
+    }
 
     // Run filter depending on current mode
     toggleDeployModeUI();
+
+    // Restore scroll positions captured before the rebuild, so selecting a GPU
+    // (or the periodic refresh) no longer jumps the view back to the top.
+    if (gpuGrid) gpuGrid.scrollTop = _prevGridScroll;
+    if (gpuGrid && _prevWinScroll) window.scrollTo(0, _prevWinScroll);
 }
 
 window.toggleGpuGroup = function(wid) {
@@ -456,137 +503,367 @@ function renderDeployments() {
 
 
 
+// ─── API Gateway ───────────────────────────────────────────────────────
+// Endpoint capability is inferred from model name (no /v1/models probe yet —
+// the router doesn't reliably expose `task` for every backend version). We use
+// a simple regex match against well-known embedding-model naming conventions.
+function gwEndpointKind(model) {
+    const m = (model || '').toLowerCase();
+    return /(embed|embedding|sentence-transformers|bge[-_]|e5[-_]|gte[-_])/.test(m)
+        ? 'embedding' : 'chat';
+}
+let gwSelectedDeploymentName = null;
+let gwExampleLang = 'curl';
+let gwTestAbort = null;
+
 function renderGateway() {
-    const list = document.getElementById('gateway-models-list');
-    const example = document.getElementById('gateway-curl-example');
-    if (!list || !example) return;
-
-    list.innerHTML = '';
-
-    // Aggregate unique models
-    const activeModels = [...new Set(deployments.filter(d => d.status === 'running').map(d => d.model))];
-
-    if (activeModels.length === 0) {
-        list.innerHTML = '<li class="list-group-item text-muted">No models currenly deployed.</li>';
-        document.getElementById('gateway-curl-example').textContent = "No models available.";
+    const listEl = document.getElementById('gw-deployments-list');
+    if (!listEl) return;
+    document.getElementById('gw-proxy-info').textContent = `Proxy at: ${window.location.hostname}:11434`;
+    const running = (deployments || []).filter(d => d.status === 'running');
+    if (running.length === 0) {
+        listEl.innerHTML = '<div class="text-muted small">No running deployments.</div>';
+        document.getElementById('gw-example-card').style.display = 'none';
+        document.getElementById('gw-test-card').style.display = 'none';
         return;
     }
-
-    activeModels.forEach(model => {
-        // Sum the actual node counts (e.g. 2 replicas = 2 nodes)
-        let count = 0;
-        deployments.filter(d => d.model === model && d.status === 'running').forEach(d => {
-            count += d.nodes ? d.nodes.length : 0;
-        });
-
-        list.innerHTML += `
-            <li class="list-group-item d-flex justify-content-between align-items-center cursor-pointer list-group-item-action" onclick="updateCurlExample('${model}')">
-                <span class="font-monospace fw-bold">${model}</span>
-                <span class="badge bg-primary rounded-pill" title="${count} nodes serving this model">${count} Nodes</span>
-            </li>
-        `;
-    });
-
-    // Auto-select first if none selected or current is gone
-    const currentSelection = document.getElementById('gateway-test-model-name')?.textContent;
-    if (activeModels.length > 0) {
-        if (!currentSelection || !activeModels.includes(currentSelection)) {
-            updateCurlExample(activeModels[0]);
+    // Collapse to one entry per served_model_name — that's the value clients
+    // actually pass in the `model` field of the OpenAI-compatible request, and
+    // it's the same key the metrics page uses to filter. The internal config
+    // record's `.name` (e.g. "GPT-OSS 120B Config") can be shared across two
+    // different served names like "...-120b" and "...-120b-low", so grouping by
+    // it would hide the user-facing model id.
+    const byServed = new Map();
+    for (const d of running) {
+        const key = d.served_model_name || d.model;
+        if (!byServed.has(key)) {
+            byServed.set(key, {
+                name: key,
+                model: d.model,
+                configNames: new Set(),
+                kind: gwEndpointKind(d.model),
+                deployments: [],
+                nodeTotal: 0,
+                nodeHealthy: 0,
+            });
         }
+        const g = byServed.get(key);
+        g.configNames.add(d.name);
+        g.deployments.push(d);
+        const nodes = d.nodes || [];
+        g.nodeTotal += nodes.length;
+        g.nodeHealthy += nodes.filter(n => n.is_healthy).length;
+    }
+    const aggregated = [...byServed.values()];
+
+    // Group by endpoint kind, larger group first.
+    const groups = { chat: [], embedding: [] };
+    for (const g of aggregated) groups[g.kind].push(g);
+    const groupMeta = {
+        chat:      { label: 'Chat completions', icon: 'fa-comments',     path: '/v1/chat/completions' },
+        embedding: { label: 'Embeddings',       icon: 'fa-vector-square', path: '/v1/embeddings' },
+    };
+    const sections = Object.keys(groups)
+        .filter(k => groups[k].length > 0)
+        .sort((a, b) => groups[b].length - groups[a].length);
+
+    listEl.innerHTML = sections.map(kind => {
+        const meta = groupMeta[kind];
+        const rows = groups[kind].map(g => {
+            const sel = g.name === gwSelectedDeploymentName ? 'selected' : '';
+            const safeName = g.name.replace(/'/g, "\\'");
+            const configLabel = [...g.configNames].join(', ');
+            return `<div class="gw-deploy-row ${sel}" onclick="gwSelectDeployment('${safeName}')">
+                <div class="gw-deploy-name">${g.name}</div>
+                <div class="gw-deploy-meta">
+                    <span title="${configLabel}">${configLabel}</span>
+                    <span><span class="gw-deploy-status ${g.nodeHealthy < g.nodeTotal ? 'unhealthy' : ''}"></span>${g.nodeHealthy}/${g.nodeTotal}</span>
+                </div>
+            </div>`;
+        }).join('');
+        return `<div class="gw-deploy-group">
+            <div class="gw-group-head">
+                <i class="fa-solid ${meta.icon}"></i><span>${meta.label}</span>
+                <span class="badge bg-light text-secondary border">${meta.path}</span>
+                <span class="ms-auto text-muted">${groups[kind].length}</span>
+            </div>
+            ${rows}
+        </div>`;
+    }).join('');
+
+    // Auto-select first if nothing valid is selected.
+    if (!gwSelectedDeploymentName || !aggregated.some(g => g.name === gwSelectedDeploymentName)) {
+        gwSelectDeployment(aggregated[0].name);
     } else {
-        const testCard = document.getElementById('gateway-test-card');
-        if (testCard) testCard.style.display = 'none';
+        gwRefreshExample();
     }
 }
 
-window.updateCurlExample = function (modelName) {
-    const pre = document.getElementById('gateway-curl-example');
-    pre.textContent = `curl -X POST http://${window.location.hostname}:11434/v1/chat/completions \\
+window.gwSelectDeployment = function (name) {
+    gwSelectedDeploymentName = name;
+    const target = `'${name.replace(/'/g, "\\'")}'`;
+    document.querySelectorAll('.gw-deploy-row').forEach(el => {
+        el.classList.toggle('selected', el.getAttribute('onclick')?.includes(target));
+    });
+    document.getElementById('gw-example-card').style.display = 'block';
+    document.getElementById('gw-test-card').style.display = 'block';
+    gwRefreshExample();
+}
+
+window.gwSelectExampleTab = function (lang) {
+    gwExampleLang = lang;
+    document.querySelectorAll('.gw-tab-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.lang === lang);
+    });
+    gwRefreshExample();
+}
+
+function gwSelectedDeployment() {
+    // gwSelectedDeploymentName is a served_model_name (the value clients pass in
+    // the `model` request field). Any running deployment with that served name
+    // will do — the router load-balances across all replicas. Used purely as a
+    // source of the upstream model id for the example/test request body.
+    return (deployments || []).find(
+        d => (d.served_model_name || d.model) === gwSelectedDeploymentName && d.status === 'running'
+    );
+}
+
+// Default prompts that match the endpoint kind. Each user edit is preserved
+// per-kind so switching back and forth doesn't blow away typed input.
+const GW_DEFAULT_PROMPT = {
+    chat: 'Hello, can you introduce yourself?',
+    embedding: 'The quick brown fox jumps over the lazy dog.',
+};
+const gwPromptCache = { chat: null, embedding: null };
+let gwLastKind = null;
+
+function gwRefreshExample() {
+    const d = gwSelectedDeployment();
+    if (!d) return;
+    const kind = gwEndpointKind(d.model);
+    const host = window.location.hostname;
+    const base = `http://${host}:11434`;
+    const code = document.getElementById('gw-example-code');
+    // `model` in the request body is the served_model_name — that's what the
+    // router and vLLM workers use to route, NOT the underlying model file id.
+    const model = d.served_model_name || d.model;
+
+    // Swap the prompt textarea to a kind-appropriate default the first time we
+    // visit each kind. If the user has typed something, that edit is captured
+    // before the swap and restored when they come back.
+    const inputEl = document.getElementById('gw-test-input');
+    if (inputEl) {
+        if (gwLastKind && gwLastKind !== kind) {
+            gwPromptCache[gwLastKind] = inputEl.value;
+        }
+        if (gwLastKind !== kind) {
+            inputEl.value = gwPromptCache[kind] ?? GW_DEFAULT_PROMPT[kind];
+            gwLastKind = kind;
+        }
+    }
+    const examplePrompt = GW_DEFAULT_PROMPT[kind];
+    if (gwExampleLang === 'curl') {
+        if (kind === 'embedding') {
+            code.textContent = `curl -X POST ${base}/v1/embeddings \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer bislaprom3#" \\
   -d '{
-    "model": "${modelName}",
+    "model": "${model}",
+    "input": "${examplePrompt}"
+  }'`;
+        } else {
+            code.textContent = `curl -X POST ${base}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer bislaprom3#" \\
+  -d '{
+    "model": "${model}",
     "messages": [
-      {"role": "user", "content": "How are you?"}
+      {"role": "user", "content": "${examplePrompt}"}
     ]
   }'`;
+        }
+    } else {
+        if (kind === 'embedding') {
+            code.textContent = `from openai import OpenAI
 
-    // Update interactive Gateway UI
-    document.getElementById('gateway-proxy-info').textContent = `Proxy at: ${window.location.hostname}:11434`;
-    document.getElementById('gateway-test-card').style.display = 'block';
-    document.getElementById('gateway-test-model-name').textContent = modelName;
+client = OpenAI(
+    base_url="${base}/v1",
+    api_key="bislaprom3#",
+)
+
+resp = client.embeddings.create(
+    model="${model}",
+    input="${examplePrompt}",
+)
+print(resp.data[0].embedding[:8], "...")`;
+        } else {
+            code.textContent = `from openai import OpenAI
+
+client = OpenAI(
+    base_url="${base}/v1",
+    api_key="bislaprom3#",
+)
+
+resp = client.chat.completions.create(
+    model="${model}",
+    messages=[
+        {"role": "user", "content": "${examplePrompt}"},
+    ],
+)
+print(resp.choices[0].message.content)`;
+        }
+    }
+    document.getElementById('gw-test-model').textContent = model;
 }
 
-window.testGatewayEndpoint = async function () {
-    const modelName = document.getElementById('gateway-test-model-name').textContent;
-    const prompt = document.getElementById('gateway-test-prompt').value;
-    const concurrencyInput = document.getElementById('gateway-test-concurrency');
-    const concurrency = parseInt(concurrencyInput ? concurrencyInput.value : 1) || 1;
-    const responseEl = document.getElementById('gateway-test-response');
-    const btn = document.getElementById('gateway-test-btn');
+window.gwCopyExample = function () {
+    const text = document.getElementById('gw-example-code').textContent;
+    navigator.clipboard?.writeText(text).then(() => {
+        const btn = document.querySelector('.gw-copy-btn');
+        if (!btn) return;
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-check me-1"></i>Copied';
+        setTimeout(() => { btn.innerHTML = orig; }, 1100);
+    });
+}
 
-    if (!prompt) return;
+window.gwRunTest = async function () {
+    const d = gwSelectedDeployment();
+    if (!d) return;
+    const kind = gwEndpointKind(d.model);
+    const input = document.getElementById('gw-test-input').value;
+    const total = Math.max(1, parseInt(document.getElementById('gw-test-total').value, 10) || 1);
+    const concurrency = Math.max(1, Math.min(total, parseInt(document.getElementById('gw-test-concurrency').value, 10) || 1));
+
+    const btn = document.getElementById('gw-test-btn');
+    const abortBtn = document.getElementById('gw-test-abort');
+    const progressBar = document.getElementById('gw-progress-bar');
+    const progressText = document.getElementById('gw-progress-text');
+    const progressRps = document.getElementById('gw-progress-rps');
+    const sentEl = document.getElementById('gw-stat-sent');
+    const successEl = document.getElementById('gw-stat-success');
+    const failEl = document.getElementById('gw-stat-fail');
+    const latEl = document.getElementById('gw-stat-latency');
+    const responseEl = document.getElementById('gw-test-response');
 
     btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Sending...';
-    responseEl.textContent = `Dispatching ${concurrency} concurrent request(s)...`;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Running…';
+    abortBtn.disabled = false;
 
-    const payload = {
-        model: modelName,
-        messages: [{ role: "user", content: prompt }]
-    };
+    progressBar.style.width = '0%';
+    sentEl.textContent = '0';
+    successEl.textContent = '0';
+    failEl.textContent = '0';
+    latEl.textContent = '—';
+    responseEl.textContent = '';
 
-    const startTime = Date.now();
-    const requests = [];
+    const abortController = new AbortController();
+    gwTestAbort = abortController;
 
-    for (let i = 0; i < concurrency; i++) {
-        requests.push(
-            fetch(`http://${window.location.hostname}:11434/v1/chat/completions`, {
+    const url = `http://${window.location.hostname}:11434${kind === 'embedding' ? '/v1/embeddings' : '/v1/chat/completions'}`;
+    const modelId = d.served_model_name || d.model;
+    const buildPayload = () => kind === 'embedding'
+        ? { model: modelId, input }
+        : { model: modelId, messages: [{ role: 'user', content: input }] };
+
+    let completed = 0, success = 0, fail = 0;
+    const latencies = [];
+    const start = Date.now();
+    let lastSampleResponse = null;
+    let inFlight = 0, dispatched = 0;
+
+    function updateUi() {
+        const pct = total === 0 ? 0 : (completed / total) * 100;
+        progressBar.style.width = pct.toFixed(1) + '%';
+        progressText.textContent = `${completed} / ${total}  ·  ${inFlight} in flight`;
+        const elapsedSec = (Date.now() - start) / 1000;
+        const rps = elapsedSec > 0 ? completed / elapsedSec : 0;
+        progressRps.textContent = `${rps.toFixed(1)} req/s`;
+        sentEl.textContent = String(dispatched);
+        successEl.textContent = String(success);
+        failEl.textContent = String(fail);
+        if (latencies.length > 0) {
+            const avg = latencies.reduce((s, v) => s + v, 0) / latencies.length;
+            latEl.textContent = avg.toFixed(2) + ' s';
+        }
+    }
+
+    async function dispatchOne(idx) {
+        inFlight++;
+        dispatched++;
+        updateUi();
+        const t0 = performance.now();
+        try {
+            const res = await fetch(url, {
                 method: 'POST',
+                signal: abortController.signal,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer bislaprom3#'
+                    'Authorization': 'Bearer bislaprom3#',
                 },
-                body: JSON.stringify(payload)
-            }).then(async res => {
-                const text = await res.text();
-                let parsed = null;
-                try { parsed = JSON.parse(text); } catch (e) { }
-
-                if (res.ok) {
-                    if (parsed && parsed.choices && parsed.choices.length > 0) {
-                        return { ok: true, id: i + 1, type: 'success', content: parsed.choices[0].message.content };
-                    }
-                    return { ok: true, id: i + 1, type: 'raw', content: text };
+                body: JSON.stringify(buildPayload()),
+            });
+            const text = await res.text();
+            const dt = (performance.now() - t0) / 1000;
+            latencies.push(dt);
+            if (res.ok) {
+                success++;
+                if (!lastSampleResponse) {
+                    try {
+                        const parsed = JSON.parse(text);
+                        if (kind === 'embedding') {
+                            const vec = parsed.data?.[0]?.embedding || [];
+                            lastSampleResponse = `[embedding length=${vec.length}] ${JSON.stringify(vec.slice(0, 8))}…`;
+                        } else {
+                            lastSampleResponse = parsed.choices?.[0]?.message?.content || text;
+                        }
+                    } catch { lastSampleResponse = text; }
+                    responseEl.textContent = `--- Sample successful response (#${idx + 1}) ---\n${lastSampleResponse}`;
                 }
-                return { ok: false, id: i + 1, type: 'error', status: res.status, content: text };
-            }).catch(err => {
-                return { ok: false, id: i + 1, type: 'network_error', content: err.message };
-            })
-        );
-    }
-
-    try {
-        const results = await Promise.all(requests);
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-
-        let outputText = `[Batch Completed in ${elapsed}s]\n\n`;
-        results.forEach(r => {
-            if (r.ok) {
-                outputText += `--- Request #${r.id} (Success) ---\n${r.content}\n\n`;
             } else {
-                outputText += `--- Request #${r.id} (FAILED) ---\n${r.status ? 'Status: ' + r.status : 'Network Error'}\n${r.content}\n\n`;
+                fail++;
+                if (fail <= 3) {
+                    responseEl.textContent += `\n\n--- Request #${idx + 1} failed (HTTP ${res.status}) ---\n${text.slice(0, 500)}`;
+                }
             }
-        });
-
-        responseEl.textContent = outputText.trim();
-
-    } catch (err) {
-        responseEl.textContent = `Critical Error running batch: ${err.message}`;
+        } catch (err) {
+            if (err.name === 'AbortError') { inFlight--; return; }
+            fail++;
+            if (fail <= 3) {
+                responseEl.textContent += `\n\n--- Request #${idx + 1} network error ---\n${err.message}`;
+            }
+        } finally {
+            inFlight--;
+            completed++;
+            updateUi();
+        }
     }
 
+    // Bounded concurrency: keep up to `concurrency` requests in flight, fed off a
+    // shared index counter, until `total` have been dispatched.
+    let nextIdx = 0;
+    async function worker() {
+        while (true) {
+            if (abortController.signal.aborted) return;
+            const my = nextIdx++;
+            if (my >= total) return;
+            await dispatchOne(my);
+        }
+    }
+    const workers = Array.from({ length: concurrency }, () => worker());
+    await Promise.all(workers);
+
+    progressText.textContent = abortController.signal.aborted
+        ? `Aborted at ${completed} / ${total}`
+        : `Completed ${completed} / ${total} in ${((Date.now() - start)/1000).toFixed(2)}s`;
     btn.disabled = false;
-    btn.innerHTML = '<i class="fa-solid fa-paper-plane me-2"></i>Send Request(s)';
+    btn.innerHTML = '<i class="fa-solid fa-paper-plane me-2"></i>Send requests';
+    abortBtn.disabled = true;
+    gwTestAbort = null;
+}
+
+window.gwAbortTest = function () {
+    if (gwTestAbort) gwTestAbort.abort();
 }
 
 function renderConfigs() {
@@ -895,22 +1172,7 @@ async function renderModelPanelBody(wid, bodyEl) {
     const models = epModels.get(wid) || [];
     const safeWid = escapeHtml(wid);
 
-    const modelRows = models.length > 0
-        ? models.map(m => {
-            const safeId = escapeHtml(m.repo_id);
-            return `
-                <div class="d-flex align-items-center justify-content-between py-1" style="border-bottom:1px solid #f1f5f9">
-                    <div>
-                        <span class="font-monospace small fw-semibold">${safeId}</span>
-                        <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(m.size || '')}</span>
-                    </div>
-                    <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
-                        data-wid="${safeWid}" data-model="${safeId}" onclick="reDownloadModel(this)">
-                        <i class="fa-solid fa-arrow-rotate-right me-1"></i>Re-download
-                    </button>
-                </div>`;
-        }).join('')
-        : '<div class="text-muted small py-1">No HuggingFace models cached on this worker.</div>';
+    const modelRows = _renderModelRows(models, safeWid);
 
     bodyEl.innerHTML = `
         <div class="mb-2" style="font-size:.8rem;font-weight:600;color:#374151;margin-top:.25rem">
@@ -958,43 +1220,61 @@ async function refreshModelList(wid) {
     }
 
     const models = epModels.get(wid) || [];
-    listEl.innerHTML = models.length > 0
-        ? models.map(m => {
-            const safeId = escapeHtml(m.repo_id);
-            return `
-                <div class="d-flex align-items-center justify-content-between py-1" style="border-bottom:1px solid #f1f5f9">
-                    <div>
-                        <span class="font-monospace small fw-semibold">${safeId}</span>
-                        <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(m.size || '')}</span>
-                    </div>
-                    <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
-                        data-wid="${safeWid}" data-model="${safeId}" onclick="reDownloadModel(this)">
-                        <i class="fa-solid fa-arrow-rotate-right me-1"></i>Re-download
+    listEl.innerHTML = _renderModelRows(models, safeWid);
+}
+
+function _renderModelRows(models, safeWid) {
+    if (!models || models.length === 0) {
+        return '<div class="text-muted small py-1">No HuggingFace models cached on this worker.</div>';
+    }
+    return models.map(m => {
+        const safeId = escapeHtml(m.repo_id);
+        return `
+            <div class="d-flex align-items-center justify-content-between py-1" style="border-bottom:1px solid #f1f5f9">
+                <div>
+                    <span class="font-monospace small fw-semibold">${safeId}</span>
+                    <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(m.size || '')}</span>
+                </div>
+                <div class="d-flex gap-1">
+                    <button class="btn btn-sm btn-outline-primary" style="font-size:.72rem;padding:.1rem .45rem"
+                        data-wid="${safeWid}" data-model="${safeId}" onclick="checkModelUpdate(this)"
+                        title="Check for a newer revision and update only if available">
+                        <i class="fa-solid fa-rotate me-1"></i>Check for update
                     </button>
-                </div>`;
-        }).join('')
-        : '<div class="text-muted small py-1">No HuggingFace models cached on this worker.</div>';
+                    <button class="btn btn-sm btn-outline-danger" style="font-size:.72rem;padding:.1rem .45rem"
+                        data-wid="${safeWid}" data-model="${safeId}" onclick="forceRedownloadModel(this)"
+                        title="Re-download every file from scratch, ignoring the cache">
+                        <i class="fa-solid fa-arrow-rotate-right me-1"></i>Force Redownload
+                    </button>
+                </div>
+            </div>`;
+    }).join('');
 }
 
 window.downloadModelFromInput = async function(wid) {
     const safeWid = escapeHtml(wid);
     const modelId = document.getElementById(`model-id-${safeWid}`)?.value.trim();
     if (!modelId) return;
-    await _doDownloadModel(wid, modelId);
+    await _doDownloadModel(wid, modelId, false);
 };
 
-window.reDownloadModel = async function(btn) {
-    await _doDownloadModel(btn.dataset.wid, btn.dataset.model);
+window.checkModelUpdate = async function(btn) {
+    await _doDownloadModel(btn.dataset.wid, btn.dataset.model, false);
 };
 
-async function _doDownloadModel(wid, modelId) {
+window.forceRedownloadModel = async function(btn) {
+    if (!confirm(`Force re-download "${btn.dataset.model}"?\nThis re-downloads every file from scratch, ignoring the cache.`)) return;
+    await _doDownloadModel(btn.dataset.wid, btn.dataset.model, true);
+};
+
+async function _doDownloadModel(wid, modelId, force = false) {
     if (modelDownloadInProgress.has(wid)) return;
 
     const safeWid = escapeHtml(wid);
     const outputEl = document.getElementById(`model-output-${safeWid}`);
     const outputWrap = document.getElementById(`model-output-wrap-${safeWid}`);
 
-    if (outputEl) outputEl.textContent = `Starting download: ${modelId}...\n`;
+    if (outputEl) outputEl.textContent = `${force ? 'Force re-downloading' : 'Checking'}: ${modelId}...\n`;
     if (outputWrap) outputWrap.style.display = '';
 
     let job_id;
@@ -1002,7 +1282,7 @@ async function _doDownloadModel(wid, modelId) {
         const resp = await fetch(`/api/endpoints/${wid}/models/download`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_id: modelId })
+            body: JSON.stringify({ model_id: modelId, force: force })
         });
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({}));

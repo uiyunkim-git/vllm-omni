@@ -306,9 +306,11 @@ impl RouterMetrics {
         .increment(1);
     }
 
-    pub fn record_retry(route: &str) {
+    pub fn record_retry(route: &str, worker_url: &str, instance: &str) {
         counter!("vllm_router_retries_total",
-            "route" => route.to_string()
+            "route" => route.to_string(),
+            "worker" => worker_url.to_string(),
+            "instance" => instance.to_string(),
         )
         .increment(1);
     }
@@ -332,32 +334,36 @@ impl RouterMetrics {
         gauge!("vllm_router_active_workers").set(count as f64);
     }
 
-    pub fn set_worker_health(worker_url: &str, healthy: bool) {
+    pub fn set_worker_health(worker_url: &str, instance: &str, healthy: bool) {
         gauge!("vllm_router_worker_health",
-            "worker" => worker_url.to_string()
+            "worker" => worker_url.to_string(),
+            "instance" => instance.to_string(),
         )
         .set(if healthy { 1.0 } else { 0.0 });
     }
 
-    pub fn set_worker_load(worker_url: &str, load: usize) {
+    pub fn set_worker_load(worker_url: &str, instance: &str, load: usize) {
         gauge!("vllm_router_worker_load",
-            "worker" => worker_url.to_string()
+            "worker" => worker_url.to_string(),
+            "instance" => instance.to_string(),
         )
         .set(load as f64);
     }
 
-    pub fn record_processed_request(worker_url: &str) {
+    pub fn record_processed_request(worker_url: &str, instance: &str) {
         counter!("vllm_router_processed_requests_total",
-            "worker" => worker_url.to_string()
+            "worker" => worker_url.to_string(),
+            "instance" => instance.to_string(),
         )
         .increment(1);
     }
 
     // Policy metrics
-    pub fn record_policy_decision(policy: &str, worker: &str) {
+    pub fn record_policy_decision(policy: &str, worker: &str, instance: &str) {
         counter!("vllm_router_policy_decisions_total",
             "policy" => policy.to_string(),
-            "worker" => worker.to_string()
+            "worker" => worker.to_string(),
+            "instance" => instance.to_string(),
         )
         .increment(1);
     }
@@ -451,8 +457,11 @@ impl RouterMetrics {
     }
 
     // Generate request metrics
-    pub fn record_generate_duration(duration: Duration) {
-        histogram!("vllm_router_generate_duration_seconds").record(duration.as_secs_f64());
+    pub fn record_generate_duration(worker_url: &str, instance: &str, duration: Duration) {
+        histogram!("vllm_router_generate_duration_seconds",
+            "worker" => worker_url.to_string(),
+            "instance" => instance.to_string(),
+        ).record(duration.as_secs_f64());
     }
 
     // Embeddings metrics
@@ -477,34 +486,38 @@ impl RouterMetrics {
     }
 
     // Running requests for cache-aware policy
-    pub fn set_running_requests(worker: &str, count: usize) {
+    pub fn set_running_requests(worker: &str, instance: &str, count: usize) {
         gauge!("vllm_router_running_requests",
-            "worker" => worker.to_string()
+            "worker" => worker.to_string(),
+            "instance" => instance.to_string(),
         )
         .set(count as f64);
     }
 
     // Circuit breaker metrics
-    pub fn set_cb_state(worker: &str, state_code: u8) {
+    pub fn set_cb_state(worker: &str, instance: &str, state_code: u8) {
         gauge!("vllm_router_cb_state",
-            "worker" => worker.to_string()
+            "worker" => worker.to_string(),
+            "instance" => instance.to_string(),
         )
         .set(state_code as f64);
     }
 
-    pub fn record_cb_state_transition(worker: &str, from: &str, to: &str) {
+    pub fn record_cb_state_transition(worker: &str, instance: &str, from: &str, to: &str) {
         counter!("vllm_router_cb_state_transitions_total",
             "worker" => worker.to_string(),
+            "instance" => instance.to_string(),
             "from" => from.to_string(),
-            "to" => to.to_string()
+            "to" => to.to_string(),
         )
         .increment(1);
     }
 
-    pub fn record_cb_outcome(worker: &str, outcome: &str) {
+    pub fn record_cb_outcome(worker: &str, instance: &str, outcome: &str) {
         counter!("vllm_router_cb_outcomes_total",
             "worker" => worker.to_string(),
-            "outcome" => outcome.to_string()
+            "instance" => instance.to_string(),
+            "outcome" => outcome.to_string(),
         )
         .increment(1);
     }

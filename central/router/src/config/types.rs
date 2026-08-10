@@ -238,6 +238,12 @@ pub enum PolicyConfig {
         load_check_interval_secs: u64,
     },
 
+    /// Pick the worker with the lowest in-flight load, with random tie-breaking.
+    /// Better than power-of-two for heterogeneous worker pools where a few fast
+    /// workers can absorb a larger share of traffic.
+    #[serde(rename = "least_connections")]
+    LeastConnections,
+
     #[serde(rename = "consistent_hash")]
     ConsistentHash {
         /// Number of virtual nodes per worker for better distribution
@@ -255,6 +261,7 @@ impl PolicyConfig {
             PolicyConfig::RoundRobin => "round_robin",
             PolicyConfig::CacheAware { .. } => "cache_aware",
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
+            PolicyConfig::LeastConnections => "least_connections",
             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
             PolicyConfig::RendezvousHash => "rendezvous_hash",
         }

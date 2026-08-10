@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 DATA_DIR = "/app/data"
 
 class DownloadJob:
-    def __init__(self, job_id: str, model_id: str):
+    def __init__(self, job_id: str, model_id: str, force: bool = False):
         self.job_id = job_id
         self.model_id = model_id
+        self.force = force
         self.status = "running"  # "running" | "done" | "failed"
         self.lines: list = []
         self.started_at = datetime.now().isoformat()
@@ -449,9 +450,9 @@ class WorkerManager:
             logger.error(f"Failed to list HF models: {e}")
         return sorted(models, key=lambda x: x['repo_id'])
 
-    def start_download_job(self, model_id: str) -> str:
+    def start_download_job(self, model_id: str, force: bool = False) -> str:
         job_id = uuid.uuid4().hex[:8]
-        job = DownloadJob(job_id, model_id)
+        job = DownloadJob(job_id, model_id, force=force)
         _download_jobs[job_id] = job
         asyncio.create_task(self._run_download_job(job))
         return job_id
@@ -476,12 +477,39 @@ class WorkerManager:
         download_py = """\
 import os, sys
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.constants import HF_HUB_CACHE
 
 model_id = os.environ['MODEL_ID']
 token = os.environ.get('HF_TOKEN') or None
+force = os.environ.get('FORCE_DOWNLOAD') == '1'
 
-print(f'Fetching file list for {model_id}...', flush=True)
+def local_commit():
+    repo_dir = os.path.join(HF_HUB_CACHE, 'models--' + model_id.replace('/', '--'))
+    ref = os.path.join(repo_dir, 'refs', 'main')
+    if os.path.exists(ref):
+        with open(ref) as f:
+            return f.read().strip()
+    return None
+
 api = HfApi(token=token)
+print(f'Checking {model_id}...', flush=True)
+try:
+    remote_sha = api.model_info(model_id).sha
+except Exception as e:
+    print(f'[✗] Failed to fetch model info: {e}', flush=True)
+    sys.exit(1)
+
+before = local_commit()
+if force:
+    print(f'Force redownload requested. Remote revision: {remote_sha[:12]}', flush=True)
+elif before == remote_sha:
+    print(f'[✓] Already up to date (revision {remote_sha[:12]}). Nothing to download.', flush=True)
+    sys.exit(0)
+elif before:
+    print(f'Update available: {before[:12]} -> {remote_sha[:12]}', flush=True)
+else:
+    print(f'Not cached yet. Downloading revision {remote_sha[:12]}...', flush=True)
+
 try:
     files = list(api.list_repo_files(model_id))
 except Exception as e:
@@ -492,7 +520,7 @@ print(f'{len(files)} files', flush=True)
 for i, fname in enumerate(files, 1):
     print(f'[{i}/{len(files)}] {fname}', flush=True)
     try:
-        hf_hub_download(model_id, filename=fname, token=token)
+        hf_hub_download(model_id, filename=fname, token=token, force_download=force)
     except Exception as e:
         print(f'  [warn] {e}', flush=True)
 
@@ -505,6 +533,7 @@ print(f'\\n[✓] Done: {model_id}', flush=True)
                 '--entrypoint', 'python3',
                 '-e', f'HF_TOKEN={token}',
                 '-e', f'MODEL_ID={job.model_id}',
+                '-e', f'FORCE_DOWNLOAD={"1" if job.force else "0"}',
                 '-v', f'{host_hf_cache}:/root/.cache/huggingface',
                 'vllm/vllm-openai:latest',
                 '-u', '-c', download_py,

@@ -22,6 +22,12 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get the worker's URL
     fn url(&self) -> &str;
 
+    /// Get a stable instance identifier generated at registration time.
+    /// Used as a Prometheus label so that re-registering the same URL gets
+    /// a fresh metrics namespace (instead of inheriting the previous
+    /// worker process's history).
+    fn instance(&self) -> &str;
+
     /// Get the worker's type (Regular, Prefill, or Decode)
     fn worker_type(&self) -> WorkerType;
 
@@ -84,9 +90,9 @@ pub trait Worker: Send + Sync + fmt::Debug {
 
     /// Record the outcome of a request to this worker
     fn record_outcome(&self, success: bool) {
-        // Record outcome-level metric with worker label
+        // Record outcome-level metric with worker + instance labels
         let outcome_str = if success { "success" } else { "failure" };
-        RouterMetrics::record_cb_outcome(self.url(), outcome_str);
+        RouterMetrics::record_cb_outcome(self.url(), self.instance(), outcome_str);
 
         // Record into circuit breaker and infer state change for metrics
         let before = self.circuit_breaker().state();
@@ -104,7 +110,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
                 crate::core::CircuitState::Open => "open",
                 crate::core::CircuitState::HalfOpen => "half_open",
             };
-            RouterMetrics::record_cb_state_transition(self.url(), from, to);
+            RouterMetrics::record_cb_state_transition(self.url(), self.instance(), from, to);
         }
 
         let state_code = match self.circuit_breaker().state() {
@@ -112,7 +118,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
             crate::core::CircuitState::Open => 1u8,
             crate::core::CircuitState::HalfOpen => 2u8,
         };
-        RouterMetrics::set_cb_state(self.url(), state_code);
+        RouterMetrics::set_cb_state(self.url(), self.instance(), state_code);
     }
 
     // === DP-aware methods ===
@@ -271,6 +277,9 @@ impl Default for HealthConfig {
 pub struct WorkerMetadata {
     /// Worker URL
     pub url: String,
+    /// Stable instance identifier (ULID) generated when this worker is created.
+    /// Used in Prometheus labels so a URL re-registration starts a fresh metric series.
+    pub instance_id: String,
     /// Worker type
     pub worker_type: WorkerType,
     /// Connection mode
@@ -315,6 +324,7 @@ impl BasicWorker {
     ) -> Self {
         let metadata = WorkerMetadata {
             url: url.clone(),
+            instance_id: ulid::Ulid::new().to_string(),
             worker_type,
             connection_mode,
             labels: std::collections::HashMap::new(),
@@ -375,6 +385,10 @@ impl Worker for BasicWorker {
         &self.metadata.url
     }
 
+    fn instance(&self) -> &str {
+        &self.metadata.instance_id
+    }
+
     fn worker_type(&self) -> WorkerType {
         self.metadata.worker_type.clone()
     }
@@ -389,7 +403,7 @@ impl Worker for BasicWorker {
 
     fn set_healthy(&self, healthy: bool) {
         self.healthy.store(healthy, Ordering::Release);
-        RouterMetrics::set_worker_health(self.url(), healthy);
+        RouterMetrics::set_worker_health(self.url(), self.instance(), healthy);
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
@@ -525,6 +539,10 @@ impl DPAwareWorker {
 impl Worker for DPAwareWorker {
     fn url(&self) -> &str {
         self.base_worker.url()
+    }
+
+    fn instance(&self) -> &str {
+        self.base_worker.instance()
     }
 
     fn worker_type(&self) -> WorkerType {

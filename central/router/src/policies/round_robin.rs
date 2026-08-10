@@ -38,10 +38,9 @@ impl LoadBalancingPolicy for RoundRobinPolicy {
         // Get and increment counter atomically
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
         let selected_idx = count % healthy_indices.len();
-        let worker = workers[healthy_indices[selected_idx]].url();
+        let selected = workers[healthy_indices[selected_idx]].as_ref();
 
-        RouterMetrics::record_processed_request(worker);
-        RouterMetrics::record_policy_decision(self.name(), worker);
+        RouterMetrics::record_policy_decision(self.name(), selected.url(), selected.instance());
         Some(healthy_indices[selected_idx])
     }
 

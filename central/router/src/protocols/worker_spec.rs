@@ -45,6 +45,11 @@ pub struct WorkerInfo {
     /// Worker URL
     pub url: String,
 
+    /// Stable instance identifier (ULID) generated when the worker was registered.
+    /// Used by controllers to differentiate a re-registration of the same URL from
+    /// the original worker instance.
+    pub instance_id: String,
+
     /// Model ID this worker serves
     pub model_id: String,
 
