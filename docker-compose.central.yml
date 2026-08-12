@@ -102,6 +102,16 @@ services:
     depends_on:
       - tailscale
     env_file: .env.central
+    environment:
+      # Host path of the git checkout, so central can compute the target commit
+      # (via a throwaway git container) and workers can self-update to it.
+      - HOST_REPO_DIR=${PWD}
+      # Real git dir when the checkout is a submodule/worktree (empty for a
+      # plain clone). Compute with: git rev-parse --git-common-dir (absolute).
+      - HOST_GIT_DIR=${HOST_GIT_DIR:-}
+      - WORKER_BRANCH=${WORKER_BRANCH:-main}
+      # Opt-in rolling auto-update of drifted, idle workers. Default OFF.
+      - WORKER_AUTO_UPDATE=${WORKER_AUTO_UPDATE:-0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./central/main.py:/app/main.py

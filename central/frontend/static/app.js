@@ -11,10 +11,47 @@ const epModels = new Map();       // worker_id -> models[] cache
 const modelDownloadInProgress = new Set();
 const _endpointActions = new Map();
 const _stopping = new Set(); // keys: dep id or "depId:gpu" for replicas
+let versionInfo = null;      // last GET /api/version payload (worker versions panel)
 
 document.addEventListener('DOMContentLoaded', () => {
-    fetchStatus();
-    setInterval(fetchStatus, 5000);
+    // Self-rescheduling poll (re-armed in finally) so a slow response can't
+    // overlap the next refresh.
+    (async function pollStatus() {
+        try {
+            await fetchStatus();
+        } finally {
+            setTimeout(pollStatus, 5000);
+        }
+    })();
+
+    // Worker versions panel (endpoints page only): separate, slower poll.
+    // Same self-rescheduling pattern as pollStatus so a slow response can't
+    // overlap the next refresh.
+    const versionsContainer = document.getElementById('worker-versions-container');
+    if (versionsContainer) {
+        (async function pollVersion() {
+            try {
+                await fetchVersionInfo();
+            } finally {
+                setTimeout(pollVersion, 15000);
+            }
+        })();
+        // Delegated listener on the container so buttons keep working across
+        // the periodic re-render (no inline onclick with interpolated ids).
+        versionsContainer.addEventListener('click', (e) => {
+            const rowBtn = e.target.closest('button[data-worker-id]');
+            if (rowBtn) {
+                rowBtn.disabled = true;
+                updateWorker(rowBtn.dataset.workerId);
+                return;
+            }
+            const allBtn = e.target.closest('#update-all-drifted-btn');
+            if (allBtn) {
+                allBtn.disabled = true;
+                updateAllWorkers();
+            }
+        });
+    }
 
     // Stop the view from jumping when a GPU card is clicked: the hidden Bootstrap
     // .btn-check input gets focus on label click and the browser scrolls that
@@ -46,6 +83,15 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('deployModal')?.addEventListener('show.bs.modal', () => {
         if (document.getElementById('deployEngine')?.value === 'vllm') fetchAllWorkerImages();
     });
+
+    // Gateway test panel API key: prefill from localStorage, persist on change
+    const gwApiKeyEl = document.getElementById('gw-api-key');
+    if (gwApiKeyEl) {
+        gwApiKeyEl.value = localStorage.getItem('gw_api_key') || '';
+        gwApiKeyEl.addEventListener('change', () => {
+            localStorage.setItem('gw_api_key', gwApiKeyEl.value);
+        });
+    }
 });
 
 async function fetchStatus() {
@@ -361,7 +407,7 @@ function renderDeployments() {
                 <td colspan="3">
                     <div class="d-flex align-items-center gap-2">
                         <i class="fa-solid fa-chevron-down" id="${gid}-icon" style="font-size:.72rem;transition:transform .2s;color:#6b7280;${iconTransform}"></i>
-                        <span class="fw-semibold">${servedName}</span>
+                        <span class="fw-semibold">${escapeHtml(servedName)}</span>
                         <span class="badge bg-secondary" style="font-size:.75rem">${replicaCount} replica${replicaCount > 1 ? 's' : ''}</span>
                         ${groupStatusHtml}
                     </div>
@@ -408,7 +454,7 @@ function renderDeployments() {
                 <tr class="${gid}-row ep-${epKey}" style="${rowDisplay}">
                     <td colspan="6" style="padding:.25rem .5rem .25rem 2rem;background:#f8fafc;border-top:1px solid #e2e8f0">
                         <div style="display:flex;align-items:center;justify-content:space-between">
-                            <span style="font-size:.75rem;font-weight:700;color:#94a3b8;letter-spacing:.06em;text-transform:uppercase">${wid}</span>
+                            <span style="font-size:.75rem;font-weight:700;color:#94a3b8;letter-spacing:.06em;text-transform:uppercase">${escapeHtml(wid)}</span>
                             <button onclick="stopEndpoint('${epKey}',this)" class="btn btn-outline-danger" style="font-size:.72rem;padding:.1rem .45rem;line-height:1.5" title="이 endpoint의 모든 replica 종료">
                                 <i class="fa-solid fa-stop me-1"></i>Stop All
                             </button>
@@ -438,25 +484,25 @@ function renderDeployments() {
                     const rowStyle = (rowDisplay || '') + (isStopping ? ';opacity:.3;pointer-events:none' : '');
                     const stopBtn = isStopping
                         ? `<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>`
-                        : `<button onclick="stopReplica('${dep.id}','${gpu}',this)" class="btn btn-sm btn-outline-danger" title="Stop this replica"><i class="fa-solid fa-stop"></i></button>`;
+                        : `<button onclick="stopReplica('${escapeHtml(dep.id)}','${escapeHtml(gpu)}',this)" class="btn btn-sm btn-outline-danger" title="Stop this replica"><i class="fa-solid fa-stop"></i></button>`;
                     list.innerHTML += `
                         <tr class="${gid}-row ep-${epKey}" style="${rowStyle}">
                             <td style="padding-left:3rem">
-                                <div class="fw-semibold small">${dep.name}</div>
-                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${dep.id}</div>
+                                <div class="fw-semibold small">${escapeHtml(dep.name)}</div>
+                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${escapeHtml(dep.id)}</div>
                             </td>
                             <td>
-                                <div class="small text-truncate" style="max-width:200px" title="${dep.model}">${dep.model}</div>
-                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${dep.served_model_name}">↳ ${dep.served_model_name}</div>` : ''}
+                                <div class="small text-truncate" style="max-width:200px" title="${escapeHtml(dep.model)}">${escapeHtml(dep.model)}</div>
+                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${escapeHtml(dep.served_model_name)}">↳ ${escapeHtml(dep.served_model_name)}</div>` : ''}
                             </td>
                             <td class="text-nowrap">
                                 <span class="badge ${engineColor} me-1">${engine}</span>
                                 <span class="badge ${dtypeColor}">${dtype}</span>
                             </td>
                             <td>${statusDot}</td>
-                            <td><span class="badge bg-light text-secondary border" style="font-size:.8rem">${gpu}</span></td>
+                            <td><span class="badge bg-light text-secondary border" style="font-size:.8rem">${escapeHtml(gpu)}</span></td>
                             <td class="text-end text-nowrap">
-                                <button onclick="viewLogs('${dep.id}','${containerName}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
+                                <button onclick="viewLogs('${escapeHtml(dep.id)}','${escapeHtml(containerName)}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
                                 ${stopBtn}
                             </td>
                         </tr>
@@ -471,17 +517,17 @@ function renderDeployments() {
                     const rowStyle = (rowDisplay || '') + (isStopping ? ';opacity:.3;pointer-events:none' : '');
                     const stopBtn = isStopping
                         ? `<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>`
-                        : `<button onclick="stopDeployment('${dep.id}',this)" class="btn btn-sm btn-outline-danger" title="Stop"><i class="fa-solid fa-stop"></i></button>`;
-                    const gpuList = (dep.gpus || []).map(g => `<span class="badge bg-light text-secondary border me-1" style="font-size:.8rem">${g}</span>`).join('');
+                        : `<button onclick="stopDeployment('${escapeHtml(dep.id)}',this)" class="btn btn-sm btn-outline-danger" title="Stop"><i class="fa-solid fa-stop"></i></button>`;
+                    const gpuList = (dep.gpus || []).map(g => `<span class="badge bg-light text-secondary border me-1" style="font-size:.8rem">${escapeHtml(g)}</span>`).join('');
                     list.innerHTML += `
                         <tr class="${gid}-row ep-${epKey}" style="${rowStyle}">
                             <td style="padding-left:3rem">
-                                <div class="fw-semibold small">${dep.name}</div>
-                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${dep.id}</div>
+                                <div class="fw-semibold small">${escapeHtml(dep.name)}</div>
+                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${escapeHtml(dep.id)}</div>
                             </td>
                             <td>
-                                <div class="small text-truncate" style="max-width:200px" title="${dep.model}">${dep.model}</div>
-                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${dep.served_model_name}">↳ ${dep.served_model_name}</div>` : ''}
+                                <div class="small text-truncate" style="max-width:200px" title="${escapeHtml(dep.model)}">${escapeHtml(dep.model)}</div>
+                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${escapeHtml(dep.served_model_name)}">↳ ${escapeHtml(dep.served_model_name)}</div>` : ''}
                             </td>
                             <td class="text-nowrap">
                                 <span class="badge ${engineColor} me-1">${engine}</span>
@@ -490,7 +536,7 @@ function renderDeployments() {
                             <td>${statusDot}</td>
                             <td><div class="d-flex flex-wrap gap-1">${gpuList}</div></td>
                             <td class="text-end text-nowrap">
-                                <button onclick="viewLogs('${dep.id}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
+                                <button onclick="viewLogs('${escapeHtml(dep.id)}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
                                 ${stopBtn}
                             </td>
                         </tr>
@@ -571,12 +617,11 @@ function renderGateway() {
         const meta = groupMeta[kind];
         const rows = groups[kind].map(g => {
             const sel = g.name === gwSelectedDeploymentName ? 'selected' : '';
-            const safeName = g.name.replace(/'/g, "\\'");
             const configLabel = [...g.configNames].join(', ');
-            return `<div class="gw-deploy-row ${sel}" onclick="gwSelectDeployment('${safeName}')">
-                <div class="gw-deploy-name">${g.name}</div>
+            return `<div class="gw-deploy-row ${sel}" data-name="${encodeURIComponent(g.name)}" onclick="gwSelectDeployment(decodeURIComponent(this.dataset.name))">
+                <div class="gw-deploy-name">${escapeHtml(g.name)}</div>
                 <div class="gw-deploy-meta">
-                    <span title="${configLabel}">${configLabel}</span>
+                    <span title="${escapeHtml(configLabel)}">${escapeHtml(configLabel)}</span>
                     <span><span class="gw-deploy-status ${g.nodeHealthy < g.nodeTotal ? 'unhealthy' : ''}"></span>${g.nodeHealthy}/${g.nodeTotal}</span>
                 </div>
             </div>`;
@@ -601,9 +646,8 @@ function renderGateway() {
 
 window.gwSelectDeployment = function (name) {
     gwSelectedDeploymentName = name;
-    const target = `'${name.replace(/'/g, "\\'")}'`;
     document.querySelectorAll('.gw-deploy-row').forEach(el => {
-        el.classList.toggle('selected', el.getAttribute('onclick')?.includes(target));
+        el.classList.toggle('selected', decodeURIComponent(el.dataset.name || '') === name);
     });
     document.getElementById('gw-example-card').style.display = 'block';
     document.getElementById('gw-test-card').style.display = 'block';
@@ -666,7 +710,7 @@ function gwRefreshExample() {
         if (kind === 'embedding') {
             code.textContent = `curl -X POST ${base}/v1/embeddings \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer bislaprom3#" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "model": "${model}",
     "input": "${examplePrompt}"
@@ -674,7 +718,7 @@ function gwRefreshExample() {
         } else {
             code.textContent = `curl -X POST ${base}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer bislaprom3#" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "model": "${model}",
     "messages": [
@@ -688,7 +732,7 @@ function gwRefreshExample() {
 
 client = OpenAI(
     base_url="${base}/v1",
-    api_key="bislaprom3#",
+    api_key="YOUR_API_KEY",
 )
 
 resp = client.embeddings.create(
@@ -701,7 +745,7 @@ print(resp.data[0].embedding[:8], "...")`;
 
 client = OpenAI(
     base_url="${base}/v1",
-    api_key="bislaprom3#",
+    api_key="YOUR_API_KEY",
 )
 
 resp = client.chat.completions.create(
@@ -734,6 +778,7 @@ window.gwRunTest = async function () {
     const input = document.getElementById('gw-test-input').value;
     const total = Math.max(1, parseInt(document.getElementById('gw-test-total').value, 10) || 1);
     const concurrency = Math.max(1, Math.min(total, parseInt(document.getElementById('gw-test-concurrency').value, 10) || 1));
+    const apiKey = (document.getElementById('gw-api-key')?.value || '').trim();
 
     const btn = document.getElementById('gw-test-btn');
     const abortBtn = document.getElementById('gw-test-abort');
@@ -799,7 +844,7 @@ window.gwRunTest = async function () {
                 signal: abortController.signal,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer bislaprom3#',
+                    ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
                 },
                 body: JSON.stringify(buildPayload()),
             });
@@ -827,14 +872,14 @@ window.gwRunTest = async function () {
                 }
             }
         } catch (err) {
-            if (err.name === 'AbortError') { inFlight--; return; }
+            if (err.name === 'AbortError') { return; }
             fail++;
             if (fail <= 3) {
                 responseEl.textContent += `\n\n--- Request #${idx + 1} network error ---\n${err.message}`;
             }
         } finally {
             inFlight--;
-            completed++;
+            if (!abortController.signal.aborted) completed++;
             updateUi();
         }
     }
@@ -968,14 +1013,14 @@ function renderEndpoints() {
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <div>
                                     <div class="fw-semibold">신규 노드 감지됨</div>
-                                    <div class="text-muted small">${ep.gpus.length}개 GPU · ${ep.host}:${ep.port}</div>
+                                    <div class="text-muted small">${ep.gpus.length}개 GPU · ${escapeHtml(ep.host)}:${escapeHtml(ep.port)}</div>
                                 </div>
                                 <span class="badge bg-warning text-dark">Pending</span>
                             </div>
-                            <div class="text-muted mb-3 font-monospace small">${ep.id}</div>
+                            <div class="text-muted mb-3 font-monospace small">${escapeHtml(ep.id)}</div>
                             <div class="input-group">
-                                <input type="text" id="accept-name-${ep.id}" class="form-control" placeholder="노드 이름 지정" value="${inputCache[`accept-name-${ep.id}`] || ep.id}">
-                                <button class="btn btn-success" onclick="acceptEndpoint('${ep.id}')">
+                                <input type="text" id="accept-name-${escapeHtml(ep.id)}" class="form-control" placeholder="노드 이름 지정" value="${escapeHtml(inputCache[`accept-name-${ep.id}`] || ep.id)}">
+                                <button class="btn btn-success" onclick="acceptEndpoint('${escapeHtml(ep.id)}')">
                                     <i class="fa-solid fa-check me-1"></i>Accept
                                 </button>
                             </div>
@@ -997,13 +1042,13 @@ function renderEndpoints() {
                                 </div>
                                 <span class="badge bg-secondary" style="font-size:.75rem">${ep.gpus.length} GPUs</span>
                             </div>
-                            <div class="text-muted small mb-1 font-monospace">${ep.host}:${ep.port}</div>
+                            <div class="text-muted small mb-1 font-monospace">${escapeHtml(ep.host)}:${escapeHtml(ep.port)}</div>
                             <div class="text-muted mb-3" style="font-size:.78rem;word-break:break-all">${safeId}</div>
                             <div class="d-flex gap-2 flex-wrap">
-                                <button class="btn btn-sm btn-outline-secondary" onclick="renameEndpoint('${ep.id}', '${escapeHtml(ep.name)}')">
+                                <button class="btn btn-sm btn-outline-secondary" data-id="${encodeURIComponent(ep.id)}" data-name="${encodeURIComponent(ep.name)}" onclick="renameEndpoint(decodeURIComponent(this.dataset.id), decodeURIComponent(this.dataset.name))">
                                     <i class="fa-solid fa-pen me-1"></i>이름 변경
                                 </button>
-                                <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${ep.id}')">
+                                <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${escapeHtml(ep.id)}')">
                                     <i class="fa-solid fa-trash me-1"></i>제거
                                 </button>
                                 <a href="/endpoints/${ep.id}/images" class="btn btn-sm btn-outline-primary">
@@ -1033,6 +1078,148 @@ function renderEndpoints() {
             if (selStart !== null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selEnd); } catch (e) {} }
         }
     }
+}
+
+// ---- Worker versions / updates panel (endpoints page) ----
+
+async function fetchVersionInfo() {
+    if (!document.getElementById('worker-versions-container')) return;
+    try {
+        const res = await fetch('/api/version');
+        if (!res.ok) throw new Error(res.statusText);
+        versionInfo = await res.json();
+    } catch (err) {
+        console.error('Failed to fetch version info', err);
+        return; // keep last rendered state on transient errors
+    }
+    renderWorkerVersions();
+}
+
+function renderWorkerVersions() {
+    const container = document.getElementById('worker-versions-container');
+    if (!container || !versionInfo) return;
+
+    const target = versionInfo.target;
+    const branch = versionInfo.branch;
+    const autoUpdate = !!versionInfo.auto_update;
+    const workers = versionInfo.workers || [];
+    // With no computable target (no repo mounted on central) drift is
+    // meaningless — don't flag it, but updates are still allowed.
+    const hasDrift = !!target && workers.some(w => w.drift && !w.updating && w.status === 'active');
+
+    const headerHtml = `
+        <div class="d-flex align-items-center flex-wrap gap-2 p-3 border-bottom">
+            ${target
+                ? `<span class="text-muted small">Target:</span>
+                   <span class="font-monospace small">${escapeHtml(String(target).slice(0, 12))}</span>`
+                : '<span class="text-muted small fst-italic">target version unavailable</span>'}
+            ${branch ? `<span class="badge bg-light text-secondary border"><i class="fa-solid fa-code-branch me-1"></i>${escapeHtml(branch)}</span>` : ''}
+            <span class="badge ${autoUpdate ? 'bg-success' : 'bg-secondary'}">Auto-update: ${autoUpdate ? 'on' : 'off'}</span>
+            <button id="update-all-drifted-btn" class="btn btn-sm btn-outline-primary ms-auto" ${hasDrift ? '' : 'disabled'}>
+                <i class="fa-solid fa-rotate me-1"></i>Update all drifted
+            </button>
+        </div>`;
+
+    if (workers.length === 0) {
+        container.innerHTML = headerHtml + '<p class="text-muted p-3 mb-0">No workers reported.</p>';
+        return;
+    }
+
+    const rows = workers.map(w => {
+        const commit = String(w.commit ?? 'unknown');
+        const commitHtml = commit === 'unmanaged'
+            ? '<span class="text-warning">unmanaged</span>'
+            : `<span class="font-monospace">${escapeHtml(commit)}</span>`;
+
+        let stateHtml;
+        if (w.updating) {
+            stateHtml = '<span class="badge bg-info text-dark"><i class="fa-solid fa-rotate fa-spin me-1"></i>updating</span>';
+        } else if (w.up_to_date) {
+            stateHtml = '<span class="badge bg-success"><i class="fa-solid fa-check me-1"></i>up to date</span>';
+        } else if (w.drift && target) {
+            stateHtml = '<span class="badge bg-warning text-dark"><i class="fa-solid fa-triangle-exclamation me-1"></i>drift</span>';
+        } else {
+            stateHtml = '<span class="badge bg-light text-muted border">&mdash; unknown</span>';
+        }
+
+        const statusHtml = w.status === 'active'
+            ? '<span class="badge bg-success">Active</span>'
+            : `<span class="badge bg-warning text-dark">${escapeHtml(w.status)}</span>`;
+
+        const disabled = w.up_to_date || w.updating || w.status !== 'active';
+        let updatedAt = '';
+        if (w.updated_at) {
+            const d = new Date(w.updated_at);
+            updatedAt = isNaN(d) ? String(w.updated_at) : d.toLocaleString();
+        }
+
+        return `<tr>
+            <td>
+                <div class="fw-semibold">${escapeHtml(w.name || w.worker_id)}</div>
+                <div class="text-muted small font-monospace">${escapeHtml(w.worker_id)}</div>
+            </td>
+            <td>${statusHtml}</td>
+            <td>${commitHtml}</td>
+            <td>${stateHtml}</td>
+            <td class="text-muted small">${escapeHtml(updatedAt)}</td>
+            <td class="text-end">
+                <button class="btn btn-sm btn-outline-primary" data-worker-id="${escapeHtml(w.worker_id)}" ${disabled ? 'disabled' : ''}>
+                    <i class="fa-solid fa-arrow-up me-1"></i>Update
+                </button>
+            </td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `${headerHtml}
+        <div style="overflow-x:auto">
+            <table class="table table-hover">
+                <thead class="table-light">
+                    <tr>
+                        <th>Worker</th>
+                        <th>Status</th>
+                        <th>Commit</th>
+                        <th>State</th>
+                        <th>Updated</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+}
+
+async function updateWorker(workerId) {
+    try {
+        const res = await fetch(`/api/workers/${encodeURIComponent(workerId)}/update`, { method: 'POST' });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showAlert('success', `Update triggered for ${escapeHtml(workerId)}`);
+        } else {
+            // 409 (mid-deploy) and other errors carry a {detail} message
+            showAlert('danger', `Update failed for ${escapeHtml(workerId)}: ${escapeHtml(body.detail || res.statusText)}`);
+        }
+    } catch (err) {
+        showAlert('danger', 'Network error while triggering update');
+    }
+    setTimeout(fetchVersionInfo, 3000);
+}
+
+async function updateAllWorkers() {
+    try {
+        const res = await fetch('/api/workers/update_all', { method: 'POST' });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok) {
+            const summary = Object.entries(body.results || {})
+                .map(([wid, r]) => `${escapeHtml(wid)}: ${escapeHtml(r)}`)
+                .join('<br>');
+            showAlert('info', 'Update all triggered.' + (summary ? '<br>' + summary : ''));
+        } else {
+            showAlert('danger', `Update all failed: ${escapeHtml(body.detail || res.statusText)}`);
+        }
+    } catch (err) {
+        showAlert('danger', 'Network error while triggering update all');
+    }
+    setTimeout(fetchVersionInfo, 3000);
 }
 
 async function renderImagePanelBody(wid, bodyEl) {

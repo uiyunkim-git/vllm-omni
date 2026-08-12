@@ -4,6 +4,7 @@ import subprocess
 import shlex
 import shutil
 import asyncio
+import threading
 import uuid
 from datetime import datetime
 from pydantic import BaseModel
@@ -28,6 +29,20 @@ class DownloadJob:
 
 _download_jobs: dict = {}  # job_id -> DownloadJob
 HOST_DATA_DIR = os.environ.get("HOST_DATA_DIR", "/home/uiyunkim/bisl-uiyunkim/applications/pons/vllm/vllm-omni/worker/data")
+# Absolute path of the git checkout ON THE HOST. The updater mounts this so it
+# can `git pull` + `docker compose up -d --build worker`. Derived from
+# HOST_DATA_DIR (…/worker/data → repo root) when not set explicitly.
+HOST_REPO_DIR = os.environ.get(
+    "HOST_REPO_DIR",
+    os.path.dirname(os.path.dirname(HOST_DATA_DIR.rstrip("/"))),
+)
+WORKER_BRANCH = os.environ.get("WORKER_BRANCH", "main")
+# When the checkout is a git submodule or linked worktree, its real git dir
+# lives OUTSIDE the repo tree (e.g. superproject/.git/modules/…). Set this to
+# that host path so the updater can mount it; leave empty for a plain clone.
+HOST_GIT_DIR = os.environ.get("HOST_GIT_DIR", "")
+# Written by the updater after a successful pull; read back to report version.
+VERSION_FILE = os.path.join(DATA_DIR, ".worker_version")
 HOST_PORT_OFFSET = 40000
 # Internal ports start at 21001 so host ports (internal + 40000) land at 61001+,
 # above the OS ephemeral port range (32768-60999) to avoid bind conflicts.
@@ -37,13 +52,21 @@ os.makedirs(DATA_DIR, exist_ok=True)
 class WorkerManager:
     def __init__(self):
         self.env = Environment(loader=FileSystemLoader('/app/templates'))
+        # Serializes deploy/stop state mutations. Deploys now run in worker
+        # threads (asyncio.to_thread), so two concurrent deploys would race the
+        # read-allocate-write of local_deployments.json and both pick the same
+        # port — the second save silently dropping the first replica's record.
+        self._state_lock = threading.Lock()
 
     def get_gpu_status(self):
         try:
             # We use the docker socket to spin up a tiny container to query the host's GPUs since the worker container doesn't have nvidia-smi
+            # timeout guards against a wedged docker daemon — without it the
+            # heartbeat loop would block forever and central would mark this
+            # worker dead until a manual restart.
             result = subprocess.run(
                 ['docker', 'run', '--rm', '--gpus', 'all', '--entrypoint', 'nvidia-smi', 'vllm/vllm-openai:latest', '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=60
             )
             if result.returncode != 0:
                 logger.error(f"Docker nvidia-smi failed: {result.stderr}")
@@ -66,6 +89,101 @@ class WorkerManager:
             logger.error(f"Exception in get_gpu_status: {e}")
             return []
 
+    # ── Self-update (CI/CD) ────────────────────────────────────────────────
+    def get_version(self) -> dict:
+        """Version this worker is running, for the heartbeat. `commit` is the
+        git SHA the updater last pulled; `unmanaged` means this worker was
+        deployed manually and has never self-updated (so central can't know
+        exactly which commit it runs)."""
+        try:
+            with open(VERSION_FILE) as f:
+                v = json.load(f)
+            return {
+                "commit": v.get("commit", "unmanaged"),
+                "subtree": v.get("subtree", ""),
+                "updated_at": v.get("updated_at", ""),
+                "updating": os.path.exists(VERSION_FILE + ".lock"),
+            }
+        except Exception:
+            return {"commit": "unmanaged", "subtree": "", "updated_at": "", "updating": os.path.exists(VERSION_FILE + ".lock")}
+
+    def self_update(self, branch: Optional[str] = None) -> dict:
+        """Launch a DETACHED updater container that pulls the latest repo and
+        recreates this worker. Detached so it survives our own restart:
+        `docker run -d` via the socket makes an independent sibling container on
+        the host, so it can `compose up -d --build worker` even as we go down.
+
+        Guards: refuses while a deploy/stop is in progress (state lock held) and
+        while another updater is already running (fixed container name)."""
+        branch = branch or WORKER_BRANCH
+
+        # Don't update mid-deploy. Non-blocking probe of the state lock.
+        if not self._state_lock.acquire(blocking=False):
+            raise RuntimeError("A deploy/stop is in progress; update deferred.")
+        try:
+            # Discover our own image so the updater runs the exact same one that
+            # is already present on this host (no dependency on a public image
+            # having both git and docker+compose). Docker sets $HOSTNAME to the
+            # container's short id, which `docker inspect` resolves.
+            container_hint = os.environ.get("HOSTNAME", "")
+            image = None
+            try:
+                image = subprocess.check_output(
+                    ["docker", "inspect", "--format", "{{.Image}}", container_hint],
+                    text=True, timeout=15,
+                ).strip()
+            except Exception:
+                pass
+            if not image:
+                # Fallback: the image compose builds for this repo.
+                image = os.environ.get("WORKER_IMAGE", "vllm-omni-worker")
+
+            updater_name = "vllm_omni_worker_updater"
+            # Clear any dead updater from a previous run.
+            subprocess.run(["docker", "rm", "-f", updater_name],
+                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Point git at the real git dir when it lives outside the worktree
+            # (submodule / linked worktree). For a plain clone, git reads /repo/.git.
+            git_env = "export GIT_DIR=/gitdir GIT_WORK_TREE=/repo" if HOST_GIT_DIR else "cd /repo"
+            script = f"""set -e
+{git_env}
+git config --global --add safe.directory /repo
+git config --global --add safe.directory /gitdir
+touch /repo/worker/data/.worker_version.lock
+git fetch --prune origin {shlex.quote(branch)}
+git checkout -f {shlex.quote(branch)}
+git reset --hard origin/{shlex.quote(branch)}
+NEWSHA=$(git rev-parse HEAD)
+SUBTREE=$(git rev-parse HEAD:worker || echo "")
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# compose bind-mount sources are HOST paths → PWD must be the host repo dir.
+export PWD={shlex.quote(HOST_REPO_DIR)}
+docker compose --project-directory {shlex.quote(HOST_REPO_DIR)} -f /repo/docker-compose.worker.yml up -d --build worker
+printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTREE" "$TS" > /repo/worker/data/.worker_version
+rm -f /repo/worker/data/.worker_version.lock
+"""
+            cmd = [
+                "docker", "run", "-d", "--rm", "--name", updater_name,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", f"{HOST_REPO_DIR}:/repo",
+            ]
+            if HOST_GIT_DIR:
+                cmd += ["-v", f"{HOST_GIT_DIR}:/gitdir"]
+            cmd += ["--entrypoint", "sh", image, "-c", script]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                # Make sure we don't leave a stale lock behind on launch failure.
+                try:
+                    os.remove(VERSION_FILE + ".lock")
+                except Exception:
+                    pass
+                raise RuntimeError(f"Failed to launch updater: {result.stderr.strip() or result.stdout.strip()}")
+            logger.info(f"Launched worker updater (branch={branch}, image={image})")
+            return {"status": "updating", "branch": branch, "updater": result.stdout.strip()[:12]}
+        finally:
+            self._state_lock.release()
+
     def load_local_deployments(self):
         deps_file = os.path.join(DATA_DIR, "local_deployments.json")
         try:
@@ -80,6 +198,12 @@ class WorkerManager:
             json.dump(deps, f, indent=2)
 
     def deploy_model(self, req: dict):
+        # Serialize deploys/stops: they read-modify-write local_deployments.json
+        # and allocate ports from a snapshot of it.
+        with self._state_lock:
+            return self._deploy_model_locked(req)
+
+    def _deploy_model_locked(self, req: dict):
         deploy_id = req["deploy_id"]
         replica_id = req["replica_id"]
 
@@ -220,7 +344,12 @@ class WorkerManager:
             raise RuntimeError(f"docker compose failed for {node_name} on host port {current_port + HOST_PORT_OFFSET}: {details or 'no output'}")
 
         nodes.append({"name": node_name, "port": current_port})
-            
+
+        # current_port may have advanced past the originally allocated value via
+        # the address-in-use retry loop above; persist the port actually bound,
+        # otherwise future allocations reserve the wrong port.
+        ports = [current_port]
+
         dep = {
             "id": deploy_id,
             "replica_id": replica_id,
@@ -233,6 +362,10 @@ class WorkerManager:
         return dep
 
     def stop_deployment(self, deploy_id: str):
+        with self._state_lock:
+            return self._stop_deployment_locked(deploy_id)
+
+    def _stop_deployment_locked(self, deploy_id: str):
         deps = self.load_local_deployments()
         # Find all replicas associated with this deploy_id
         matching_indices = []
@@ -262,6 +395,10 @@ class WorkerManager:
         return True
 
     def stop_replica(self, deploy_id: str, global_gpu_id: str):
+        with self._state_lock:
+            return self._stop_replica_locked(deploy_id, global_gpu_id)
+
+    def _stop_replica_locked(self, deploy_id: str, global_gpu_id: str):
         # replica_id format: "{deploy_id}_{wid}_{gid}"
         wid, gid = global_gpu_id.rsplit("-", 1)
         replica_id = f"{deploy_id}_{wid}_{gid}"

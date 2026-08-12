@@ -11,6 +11,14 @@ services:
     env_file: .env.worker
     environment:
       - HOST_DATA_DIR=${PWD}/worker/data
+      # Host path of this git checkout — the self-updater mounts it to pull +
+      # rebuild. Must be the real host path (compose bind-mounts resolve on the
+      # host daemon), hence ${PWD} at `compose up` time.
+      - HOST_REPO_DIR=${PWD}
+      # Real git dir when this checkout is a submodule/worktree (empty for a
+      # plain clone). Compute with: git rev-parse --git-common-dir (absolute).
+      - HOST_GIT_DIR=${HOST_GIT_DIR:-}
+      - WORKER_BRANCH=${WORKER_BRANCH:-main}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./worker/main.py:/app/main.py

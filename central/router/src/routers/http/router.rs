@@ -277,6 +277,51 @@ impl Router {
             None
         };
 
+        // Background resolver for workers stuck with model_id="unknown".
+        // The label is fetched from /v1/models exactly ONCE at registration; a
+        // worker that was unreachable at that moment (router restart during a
+        // network flap, vLLM engine still loading) kept "unknown" forever, so
+        // model-filtered requests never routed to it — "deployed and healthy,
+        // but inference never reaches it". Re-resolve once the worker is
+        // reachable again and re-register it under its real model.
+        {
+            let registry = ctx.worker_registry.clone();
+            let policy_registry = ctx.policy_registry.clone();
+            let client = ctx.client.clone();
+            let cb_config = core_cb_config.clone();
+            let hc_config = health_config.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    for worker in registry.get_all() {
+                        if worker.model_id() != "unknown" || !worker.is_healthy() {
+                            continue;
+                        }
+                        let url = worker.url().to_string();
+                        let model_id = Self::fetch_worker_model_id(&client, &url).await;
+                        if model_id == "unknown" {
+                            continue;
+                        }
+                        info!(
+                            "Re-resolved model for worker {}: {} — re-registering under real model",
+                            url, model_id
+                        );
+                        registry.remove_by_url(&url);
+                        let mut labels = HashMap::new();
+                        labels.insert("model_id".to_string(), model_id.clone());
+                        let new_worker = BasicWorker::new(url.clone(), WorkerType::Regular)
+                            .with_labels(labels)
+                            .with_circuit_breaker_config(cb_config.clone())
+                            .with_health_config(hc_config.clone());
+                        registry.register(Arc::new(new_worker));
+                        policy_registry.on_worker_added(&model_id, None);
+                        save_worker_state(&registry);
+                    }
+                }
+            });
+        }
+
         Ok(Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
@@ -710,6 +755,16 @@ impl Router {
                     None
                 };
 
+                // For streaming requests, completion metrics (processed count,
+                // generate duration, CB outcome) can only be known when the
+                // stream ENDS, not when headers arrive. Hand the forwarding task
+                // enough context to record them at true completion.
+                let stream_ctx = if is_stream {
+                    Some((Arc::clone(&worker), start, route.to_string()))
+                } else {
+                    None
+                };
+
                 let response = self
                     .send_typed_request(
                         headers,
@@ -718,22 +773,38 @@ impl Router {
                         worker.url(),
                         is_stream,
                         load_guard,
+                        stream_ctx,
                     )
                     .await;
 
-                // Client errors (4xx) are not worker failures - only server errors (5xx)
-                // should count against the circuit breaker.
+                // Client errors (4xx) are not worker failures — EXCEPT the retryable
+                // ones (408/429): those signal an overloaded/unresponsive worker.
+                // Counting them as success would reset the circuit breaker's failure
+                // streak on every 429, so a saturated worker could never trip its
+                // breaker and would keep receiving traffic indefinitely.
                 let status = response.status();
-                worker.record_outcome(status.is_success() || status.is_client_error());
+                // Successful STREAMING responses: CB outcome + success metrics are
+                // recorded by the forwarding task at stream completion (a 200
+                // header only means "accepted", not "generated"). Recording here
+                // would count a stream that dies one chunk later as a success and
+                // measure TTFB instead of generation time.
+                let stream_success = is_stream && status.is_success();
+                if !stream_success {
+                    let cb_success = status.is_success()
+                        || (status.is_client_error() && !is_retryable_status(status));
+                    worker.record_outcome(cb_success);
+                }
 
                 // Success-only metrics fire here (inside the closure) so we still have a
                 // reference to the worker that actually completed the request. That lets
                 // the latency histogram carry `worker` + `instance` labels — required for
                 // the per-deployment latency breakdown in Central's UI.
                 if status.is_success() {
-                    RouterMetrics::record_processed_request(worker.url(), worker.instance());
-                    RouterMetrics::record_request(route);
-                    RouterMetrics::record_generate_duration(worker.url(), worker.instance(), start.elapsed());
+                    if !is_stream {
+                        RouterMetrics::record_processed_request(worker.url(), worker.instance());
+                        RouterMetrics::record_request(route);
+                        RouterMetrics::record_generate_duration(worker.url(), worker.instance(), start.elapsed());
+                    }
                 } else if is_retryable_status(status) {
                     // Attribute the retry to the worker whose attempt just failed —
                     // so the per-model retry-rate card can be aggregated against the
@@ -892,7 +963,37 @@ impl Router {
             .await
     }
 
+    /// Record completion metrics + circuit-breaker outcome for a streaming
+    /// request at the moment the stream actually ends.
+    /// - `completed`: upstream closed the stream normally → success.
+    /// - `upstream_err`: mid-stream error → worker failure.
+    /// - neither (client abort): no CB outcome recorded — a client hanging up
+    ///   says nothing about worker health.
+    fn record_stream_completion(
+        ctx: Option<(Arc<dyn Worker>, Instant, String)>,
+        completed: bool,
+        upstream_err: bool,
+    ) {
+        let Some((worker, start, route)) = ctx else {
+            return;
+        };
+        if completed {
+            worker.record_outcome(true);
+            RouterMetrics::record_processed_request(worker.url(), worker.instance());
+            RouterMetrics::record_request(&route);
+            RouterMetrics::record_generate_duration(
+                worker.url(),
+                worker.instance(),
+                start.elapsed(),
+            );
+        } else if upstream_err {
+            worker.record_outcome(false);
+            RouterMetrics::record_request_error(&route, "stream_error");
+        }
+    }
+
     // Send typed request directly without conversion
+    #[allow(clippy::too_many_arguments)]
     async fn send_typed_request<T: serde::Serialize>(
         &self,
         headers: Option<&HeaderMap>,
@@ -901,6 +1002,10 @@ impl Router {
         worker_url: &str,
         is_stream: bool,
         load_guard: Option<LoadGuard>, // owns the in-flight counter increment
+        // (worker, request start, route) — when present and the upstream answers
+        // 2xx, the stream-forwarding task records completion metrics + CB outcome
+        // when the stream actually ends (see route_typed_request).
+        stream_ctx: Option<(Arc<dyn Worker>, Instant, String)>,
     ) -> Response {
         let (mut request_builder, extracted_dp_rank, request_url) =
             if self.intra_node_data_parallel_size > 1 {
@@ -996,6 +1101,10 @@ impl Router {
         let status = StatusCode::from_u16(res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
+        // Only record stream-completion metrics for accepted (2xx) streams;
+        // non-2xx responses are handled (and possibly retried) by the caller.
+        let record_ctx = if status.is_success() { stream_ctx } else { None };
+
         if !is_stream {
             // For non-streaming requests, preserve headers
             let response_headers = header_utils::preserve_response_headers(res.headers());
@@ -1033,6 +1142,8 @@ impl Router {
             tokio::spawn(async move {
                 let _guard = guard; // hold for the entire forward loop
                 let mut stream = stream;
+                let mut completed = false;
+                let mut upstream_err = false;
                 loop {
                     tokio::select! {
                         // Stop as soon as the client goes away, even if no chunk has
@@ -1049,12 +1160,14 @@ impl Router {
                             }
                             Some(Err(e)) => {
                                 let _ = tx.send(Err(format!("Stream error: {}", e)));
+                                upstream_err = true;
                                 break;
                             }
-                            None => break,
+                            None => { completed = true; break; }
                         },
                     }
                 }
+                Self::record_stream_completion(record_ctx, completed, upstream_err);
                 // _guard drops here → decrement runs once.
             });
 
@@ -1078,6 +1191,8 @@ impl Router {
             // Spawn task to forward stream
             tokio::spawn(async move {
                 let mut stream = stream;
+                let mut completed = false;
+                let mut upstream_err = false;
                 loop {
                     tokio::select! {
                         // Client disconnected: stop pulling from upstream so the
@@ -1092,12 +1207,14 @@ impl Router {
                             }
                             Some(Err(e)) => {
                                 let _ = tx.send(Err(format!("Stream error: {}", e)));
+                                upstream_err = true;
                                 break;
                             }
-                            None => break,
+                            None => { completed = true; break; }
                         },
                     }
                 }
+                Self::record_stream_completion(record_ctx, completed, upstream_err);
             });
 
             let stream = UnboundedReceiverStream::new(rx);

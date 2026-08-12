@@ -14,14 +14,29 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
-P2C_ROUTER_URL = "http://143.248.74.105:11434"
+P2C_ROUTER_URL = os.environ.get("P2C_ROUTER_URL", "http://143.248.74.105:11434")
+
+# CI/CD self-update config.
+HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "")          # host path of the git checkout
+HOST_GIT_DIR = os.environ.get("HOST_GIT_DIR", "")            # real git dir if submodule/worktree
+WORKER_BRANCH = os.environ.get("WORKER_BRANCH", "main")
+WORKER_AUTO_UPDATE = os.environ.get("WORKER_AUTO_UPDATE", "0") == "1"
+GIT_IMAGE = os.environ.get("GIT_IMAGE", "alpine/git")
 
 class CentralManager:
     def __init__(self):
         self._dep_lock = asyncio.Lock()
+        # worker_id -> version dict reported in the heartbeat.
+        self._worker_versions: dict = {}
+        # Cached target commit (what workers should converge to) + timestamp.
+        self._target_cache: dict = {"commit": None, "ts": 0.0}
+        # worker_id -> monotonic ts of the last update we triggered (cooldown).
+        self._update_cooldown: dict = {}
         db.init_db()
 
-    def register_worker(self, worker_id: str, host: str, port: int, gpus: list):
+    def register_worker(self, worker_id: str, host: str, port: int, gpus: list, version: dict = None):
+        if version:
+            self._worker_versions[worker_id] = {**version, "seen": time.time()}
         conn = db.get_db()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,))
@@ -185,7 +200,32 @@ class CentralManager:
 
     async def deploy_model(self, req: dict):
         deploy_id = str(uuid.uuid4())[:8]
-        
+        touched_wids: set = set()
+        try:
+            return await self._deploy_model_inner(req, deploy_id, touched_wids)
+        except Exception:
+            # Roll back replicas already started on workers we touched. Without
+            # this, a failure on replica N of M leaves replicas 1..N-1 running
+            # but unrecorded — invisible to the UI, pinning their GPUs until
+            # someone cleans up by hand.
+            if touched_wids:
+                all_workers = self.get_workers()
+                async with httpx.AsyncClient() as client:
+                    for wid in touched_wids:
+                        w = all_workers.get(wid)
+                        if not w:
+                            continue
+                        try:
+                            await client.post(
+                                f"http://{w['host']}:{w['port']}/api/internal/stop/{deploy_id}",
+                                timeout=60.0,
+                            )
+                            logger.info(f"Rolled back partial deploy {deploy_id} on worker {wid}")
+                        except Exception as e:
+                            logger.error(f"Rollback of {deploy_id} on worker {wid} failed: {e}")
+            raise
+
+    async def _deploy_model_inner(self, req: dict, deploy_id: str, touched_wids: set):
         # Group requested GPUs by worker
         worker_assignments = {}
         for global_gpu_id in req["gpus"]:
@@ -220,9 +260,11 @@ class CentralManager:
             "nodes": []
         }
 
-        existing_deps = self.load_deployments()
-
-        # Send deployment commands to workers
+        # Send deployment commands to workers.
+        # touched_wids tracks workers that received at least one deploy command,
+        # so a mid-sequence failure can roll back the replicas already started
+        # instead of leaving orphaned containers pinning GPUs.
+        touched_wids: set = set()
         all_workers = self.get_workers()
         async with httpx.AsyncClient() as client:
             if req["deployment_type"] == "replicas":
@@ -251,6 +293,7 @@ class CentralManager:
                             "vllm_image": req.get("vllm_image") or None
                         }
                         
+                        touched_wids.add(wid)
                         resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                         if resp.status_code != 200:
                             raise Exception(f"Failed to deploy replica on worker {wid} GPU {gid}: {resp.text}")
@@ -291,6 +334,7 @@ class CentralManager:
                     "vllm_image": req.get("vllm_image") or None
                 }
                 
+                touched_wids.add(wid)
                 resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                 if resp.status_code != 200:
                     raise Exception(f"Failed to deploy TP model on worker {wid}: {resp.text}")
@@ -304,8 +348,14 @@ class CentralManager:
                         "is_healthy": False
                     })
         
-        existing_deps.append(dep)
-        self.save_deployments(existing_deps)
+        # Persist under the lock, against a FRESH read. The old pattern loaded
+        # the list BEFORE the (up to 600s) HTTP deploys and saved it after —
+        # any stop/deploy that committed in between was silently clobbered by
+        # save_deployments' delete-all-then-reinsert.
+        async with self._dep_lock:
+            deps_now = self.load_deployments()
+            deps_now.append(dep)
+            self.save_deployments(deps_now)
         return dep
 
     async def stop_deployment(self, deploy_id: str):
@@ -579,49 +629,71 @@ class CentralManager:
         return None
 
     async def run_health_checks(self):
+        # ── Phase 1: probe every unique endpoint CONCURRENTLY (read-only). ──
+        # The old sequential loop cost up to 13-21s per dead node; with ~40
+        # nodes a single cycle could take 8-14 minutes, during which the UI
+        # showed stale health (dead workers stayed green for many minutes).
         deps = self.load_deployments()
-        changed = False
 
-        # Deduplicate health check targets: same host:port:served_model only checked once.
-        # Including served_model in the key matters when an endpoint has been re-used by a
-        # new deployment serving a different model — otherwise the cache hit from the old
-        # deployment's failed check would keep the new deployment stuck.
-        checked_endpoints: dict = {}  # (host, port, served_model) -> bool
+        # Deduplicate probe targets: same host:port:served_model only checked
+        # once. Including served_model in the key matters when an endpoint has
+        # been re-used by a new deployment serving a different model.
+        probe_targets: dict = {}  # (host, api_port, served) -> dep (for engine/name)
+        for dep in deps:
+            if dep["status"] not in ["running", "starting"]:
+                continue
+            served_name = dep.get("served_model_name") or dep.get("model", "")
+            for node in dep.get("nodes", []):
+                key = (node["host"], node["port"] + 40000, served_name)
+                probe_targets.setdefault(key, dep)
 
-        # Track stale nodes to prune from deployments. A node is stale when its endpoint
-        # is alive but now serves a different model than this deployment expects — the
-        # endpoint has been "recycled" by another deployment.
-        stale_nodes: list = []  # list of (dep_idx, node_idx)
+        results: dict = {}  # key -> "other_model" | True | False
+        sem = asyncio.Semaphore(16)
 
         async with httpx.AsyncClient(verify=False) as client:
-            for dep_idx, dep in enumerate(deps):
+            async def probe(key, dep):
+                host, api_port, served_name = key
+                async with sem:
+                    other = await self._node_serves_other_model(client, host, api_port, served_name)
+                    if other is not None:
+                        logger.info(
+                            f"Node {host}:{api_port} now serves {other!r}, not {served_name!r} "
+                            f"— marking stale for cleanup"
+                        )
+                        results[key] = "other_model"
+                        return
+                    results[key] = await self._check_node_ready(client, host, api_port, dep)
+
+            await asyncio.gather(*(probe(k, d) for k, d in probe_targets.items()))
+
+        # ── Phase 2: apply results to a FRESH copy under the lock. ──────────
+        # The old code mutated the list it loaded before the (multi-minute)
+        # probe pass and wrote it back wholesale — clobbering any deploy/stop
+        # that committed in between.
+        to_deregister: list = []  # (host, port)
+        to_register: list = []    # (host, port)
+        async with self._dep_lock:
+            deps = self.load_deployments()
+            changed = False
+            for dep in deps:
                 if dep["status"] not in ["running", "starting"]:
                     continue
-
                 served_name = dep.get("served_model_name") or dep.get("model", "")
                 all_healthy = True
+                stale_idx: list = []
                 for node_idx, node in enumerate(dep.get("nodes", [])):
-                    host = node["host"]
-                    api_port = node["port"] + 40000
-                    endpoint_key = (host, api_port, served_name)
+                    key = (node["host"], node["port"] + 40000, served_name)
+                    res = results.get(key)
+                    if res is None:
+                        # Node appeared after the probe pass — next cycle covers it.
+                        if not node.get("is_healthy"):
+                            all_healthy = False
+                        continue
+                    if res == "other_model":
+                        stale_idx.append(node_idx)
+                        continue
 
-                    if endpoint_key not in checked_endpoints:
-                        # If endpoint serves a different model now, mark stale and skip the rest.
-                        other = await self._node_serves_other_model(client, host, api_port, served_name)
-                        if other is not None:
-                            logger.info(
-                                f"Node {host}:{api_port} now serves {other!r}, not {served_name!r} "
-                                f"(deployment {dep['id']}) — marking stale for cleanup"
-                            )
-                            stale_nodes.append((dep_idx, node_idx))
-                            checked_endpoints[endpoint_key] = False
-                        else:
-                            checked_endpoints[endpoint_key] = await self._check_node_ready(
-                                client, host, api_port, dep
-                            )
-
-                    is_healthy = checked_endpoints[endpoint_key]
-
+                    is_healthy = bool(res)
                     # Require 2 consecutive failures before marking unhealthy
                     # to avoid flapping from transient relay timeouts
                     if not is_healthy and node.get("is_healthy"):
@@ -631,37 +703,159 @@ class CentralManager:
                             node["is_healthy"] = False
                             node["_fail_count"] = 0
                             changed = True
-                            await self._p2c_deregister(host, node["port"])
+                            to_deregister.append((node["host"], node["port"]))
                     elif is_healthy:
                         if not node.get("is_healthy"):
                             node["is_healthy"] = True
                             changed = True
-                            # Fire-and-forget — _p2c_register internally retries
-                            # for up to 30 min so we don't want to block the
-                            # health-check loop on a single slow registration.
-                            asyncio.create_task(self._p2c_register(host, node["port"]))
+                            to_register.append((node["host"], node["port"]))
                         node["_fail_count"] = 0
 
                     if not node.get("is_healthy"):
                         all_healthy = False
 
-                if all_healthy and dep["status"] == "starting":
+                # Prune stale nodes in reverse so deletion doesn't shift positions.
+                for node_idx in reversed(stale_idx):
+                    bad = dep["nodes"].pop(node_idx)
+                    changed = True
+                    logger.info(f"Pruned stale node {bad.get('name')} from deployment {dep['id']}")
+                    to_deregister.append((bad["host"], bad["port"]))
+
+                if all_healthy and dep["status"] == "starting" and dep.get("nodes"):
                     dep["status"] = "running"
                     changed = True
 
-        # Prune stale nodes (endpoint now serves a different model — its slot was reused).
-        # Walk indices in reverse so deletion doesn't shift remaining positions.
-        if stale_nodes:
-            changed = True
-            for dep_idx, node_idx in sorted(stale_nodes, reverse=True):
-                if dep_idx < len(deps) and node_idx < len(deps[dep_idx].get("nodes", [])):
-                    bad = deps[dep_idx]["nodes"].pop(node_idx)
-                    logger.info(f"Pruned stale node {bad.get('name')} from deployment {deps[dep_idx]['id']}")
-                    # Best-effort deregister from P2C; harmless if already gone.
-                    try:
-                        await self._p2c_deregister(bad["host"], bad["port"])
-                    except Exception:
-                        pass
+            if changed:
+                self.save_deployments(deps)
 
-        if changed:
-            self.save_deployments(deps)
+        # ── Phase 3: P2C router updates OUTSIDE the lock. ────────────────────
+        for host, port in to_deregister:
+            try:
+                await self._p2c_deregister(host, port)
+            except Exception:
+                pass
+        for host, port in to_register:
+            # Fire-and-forget — _p2c_register internally retries for up to
+            # 30 min; never block the health loop on a slow registration.
+            asyncio.create_task(self._p2c_register(host, port))
+
+    # ── CI/CD: worker version tracking + rolling self-update ────────────────
+    def _target_version_blocking(self) -> Optional[str]:
+        """Latest commit on WORKER_BRANCH as seen from central's checkout — the
+        commit workers should converge to. Computed with a throwaway git
+        container (central has the docker socket but not git/the repo)."""
+        if not HOST_REPO_DIR:
+            return None
+
+        def _git(*args, timeout=20):
+            base = ["docker", "run", "--rm", "-v", f"{HOST_REPO_DIR}:/repo"]
+            env = []
+            if HOST_GIT_DIR:
+                # Submodule/worktree: mount the real git dir and point git at it.
+                base += ["-v", f"{HOST_GIT_DIR}:/gitdir",
+                         "-e", "GIT_DIR=/gitdir", "-e", "GIT_WORK_TREE=/repo"]
+            base += [GIT_IMAGE, "-c", "safe.directory=*"]
+            if not HOST_GIT_DIR:
+                base += ["-C", "/repo"]
+            return subprocess.run(base + list(args), capture_output=True, text=True, timeout=timeout)
+
+        try:
+            # fetch quietly so the target reflects the freshest origin state; if
+            # the network/creds don't allow it, rev-parse still returns local HEAD.
+            _git("fetch", "--quiet", "origin", WORKER_BRANCH, timeout=30)
+            out = _git("rev-parse", f"origin/{WORKER_BRANCH}")
+            sha = out.stdout.strip()
+            if not sha:
+                logger.warning(f"target-version rev-parse empty: {out.stderr.strip()}")
+            return sha or None
+        except Exception as e:
+            logger.warning(f"target-version lookup failed: {e}")
+            return None
+
+    async def get_target_version(self, max_age: float = 60.0) -> Optional[str]:
+        if self._target_cache["commit"] and (time.time() - self._target_cache["ts"]) < max_age:
+            return self._target_cache["commit"]
+        sha = await asyncio.to_thread(self._target_version_blocking)
+        if sha:
+            self._target_cache = {"commit": sha, "ts": time.time()}
+        return self._target_cache["commit"]
+
+    def worker_version_status(self, target: Optional[str]) -> list:
+        """Per-worker version + drift, for the UI."""
+        out = []
+        for wid, w in self.get_workers().items():
+            ver = self._worker_versions.get(wid, {})
+            commit = ver.get("commit", "unknown")
+            short = commit[:12] if commit and commit not in ("unknown", "unmanaged") else commit
+            up_to_date = bool(target) and commit == target
+            out.append({
+                "worker_id": wid,
+                "name": w.get("name"),
+                "status": w.get("status"),
+                "commit": short,
+                "updating": ver.get("updating", False),
+                "updated_at": ver.get("updated_at", ""),
+                "up_to_date": up_to_date,
+                "drift": bool(target) and commit not in (target, "unknown") ,
+            })
+        return out
+
+    async def update_worker(self, worker_id: str, branch: Optional[str] = None) -> dict:
+        """Ask one worker to self-update. Skips workers with an in-flight deploy
+        (worker returns 409) and records a cooldown so the auto-loop doesn't
+        hammer a worker that's mid-restart."""
+        workers = self.get_workers()
+        if worker_id not in workers:
+            raise Exception(f"Worker {worker_id} not found")
+        w = workers[worker_id]
+        url = f"http://{w['host']}:{w['port']}/api/internal/self_update"
+        self._update_cooldown[worker_id] = time.time()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json={"branch": branch or WORKER_BRANCH}, timeout=30.0)
+        if resp.status_code != 200:
+            raise Exception(f"Worker {worker_id} update failed ({resp.status_code}): {resp.text}")
+        return resp.json()
+
+    async def auto_update_loop(self):
+        """Opt-in (WORKER_AUTO_UPDATE=1). Rolls workers whose reported commit
+        differs from the target, ONE at a time, only when that worker has no
+        active deployments (so a serving GPU isn't yanked mid-inference), with a
+        per-worker cooldown. Never touches 'unmanaged' workers automatically —
+        those were hand-deployed and adopting them is an explicit operator action."""
+        if not WORKER_AUTO_UPDATE:
+            logger.info("Worker auto-update disabled (set WORKER_AUTO_UPDATE=1 to enable).")
+            return
+        logger.info("Worker auto-update loop started.")
+        while True:
+            await asyncio.sleep(60)
+            try:
+                target = await self.get_target_version()
+                if not target:
+                    continue
+                # worker_id -> set of GPUs currently serving (skip busy workers)
+                busy = set()
+                for dep in self.load_deployments():
+                    for gid in dep.get("gpus", []):
+                        busy.add(gid.rsplit("-", 1)[0])
+                for wid, w in self.get_workers().items():
+                    if w.get("status") != "active":
+                        continue
+                    if wid in busy:
+                        continue  # serving — don't restart under load
+                    ver = self._worker_versions.get(wid, {})
+                    commit = ver.get("commit")
+                    if not commit or commit in ("unmanaged", "unknown") or commit == target:
+                        continue
+                    if ver.get("updating"):
+                        continue
+                    last = self._update_cooldown.get(wid, 0)
+                    if time.time() - last < 300:
+                        continue
+                    logger.info(f"Auto-update: worker {wid} {commit[:12]} → {target[:12]}")
+                    try:
+                        await self.update_worker(wid)
+                    except Exception as e:
+                        logger.warning(f"Auto-update of {wid} failed: {e}")
+                    break  # one at a time — re-evaluate next tick
+            except Exception as e:
+                logger.error(f"auto_update_loop error: {e}")

@@ -392,6 +392,15 @@ const WINDOW_LABELS = {
 };
 function windowLabel(s) { return WINDOW_LABELS[s] || `last ${s}s`; }
 
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[ch]));
+}
 function shortWorker(w) {
     if (typeof w === 'object' && w !== null) return w.name || w.url;
     return w;
@@ -560,7 +569,7 @@ function renderTabs(d) {
     const names = Object.keys(counts).sort();
     const html = [`<button class="pill ${selectedDep === ALL_TAB ? 'active' : ''}" data-dep="${ALL_TAB}">All<span class="count">${(d.per_worker || []).length}</span></button>`];
     for (const name of names) {
-        const safe = String(name).replace(/"/g, '&quot;');
+        const safe = escapeHtml(name);
         html.push(`<button class="pill ${selectedDep === name ? 'active' : ''}" data-dep="${safe}">${safe}<span class="count">${counts[name]}</span></button>`);
     }
     container.innerHTML = html.join('');
@@ -631,6 +640,11 @@ function renderLive(d) {
     for (const w of sorted) {
         workerRps.set(w.url, workerLive5sRps(w.url, nowMs, w.processed || 0));
     }
+    // Prune buffers for workers that no longer exist so the map can't grow forever.
+    const _liveUrls = new Set((d.per_worker || []).map(w => w.url));
+    for (const url of [..._workerLiveBuf.keys()]) {
+        if (!_liveUrls.has(url)) _workerLiveBuf.delete(url);
+    }
     const groupRps = new Map();
     for (const [host, ws] of groupArr) {
         let total = 0, any = false;
@@ -686,23 +700,28 @@ function renderGroupedTable({ body, groups, expanded, toggleFn, workerValue, gro
             const port = sep === -1 ? full : full.slice(sep + 1);
             const wv = workerValue(w);
             const pct = wv == null ? 0 : Math.min(100, Math.round(wv / maxWorkerVal * 100));
-            return `<div class="if-row" title="${full}">
+            return `<div class="if-row" title="${escapeHtml(full)}">
                 <span class="if-dot ${cbDotClass(w.cb_state)}"></span>
-                <span class="if-port">:${port}</span>
+                <span class="if-port">:${escapeHtml(port)}</span>
                 <div class="if-bar"><div class="if-bar-fill" style="width:${pct}%"></div></div>
                 <span class="if-num">${fmtWorker(wv)}${unitSpan}</span>
             </div>`;
         }).join('');
-        return `<div class="if-group ${openClass}" data-host="${host}">
-            <div class="if-group-head" onclick="${toggleFn}('${host}')">
+        return `<div class="if-group ${openClass}" data-host="${escapeHtml(host)}">
+            <div class="if-group-head">
                 <span class="if-caret">▶</span>
-                <span class="if-group-title">${host}<span class="if-group-meta">${ws.length} workers</span></span>
+                <span class="if-group-title">${escapeHtml(host)}<span class="if-group-meta">${ws.length} workers</span></span>
                 <div class="if-group-bar"><div class="if-group-bar-fill" style="width:${groupPct}%"></div></div>
                 <span class="if-group-total">${fmtGroup(gv)}${unitSpan}</span>
             </div>
             <div class="if-group-body">${rows}</div>
         </div>`;
     }).join('') || `<div class="text-center text-muted py-3">No workers</div>`;
+    // Toggle handlers attached via data-host (the toggle functions are globals)
+    // instead of inline onclick, so host names can't break out of the attribute.
+    body.querySelectorAll('.if-group-head').forEach(el => {
+        el.addEventListener('click', () => window[toggleFn](el.parentElement.dataset.host));
+    });
 }
 
 function renderWindow(d) {
@@ -818,10 +837,10 @@ function renderWindow(d) {
         ? '<div class="text-center text-muted py-3">No transitions in this window</div>'
         : transRows.map(t => `
             <div class="if-row" style="grid-template-columns: 1fr auto auto auto 56px;" title="cumulative: ${t.count}">
-                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.name || t.worker}</span>
-                <span class="badge bg-secondary" style="font-size:.65rem;">${t.from_state}</span>
+                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(t.name || t.worker)}</span>
+                <span class="badge bg-secondary" style="font-size:.65rem;">${escapeHtml(t.from_state)}</span>
                 <span style="color:#9ca3af;">→</span>
-                <span class="badge bg-secondary" style="font-size:.65rem;">${t.to_state}</span>
+                <span class="badge bg-secondary" style="font-size:.65rem;">${escapeHtml(t.to_state)}</span>
                 <span class="if-num">${t.count_window}</span>
             </div>`).join('');
 }
@@ -854,11 +873,23 @@ async function fetchData(updateLive) {
     }
 }
 
-// Initial load + regular polling: refresh BOTH Live and Window
-fetchData(true);
-setInterval(() => fetchData(true), POLL_INTERVAL_MS);
+// Initial load + regular polling: refresh BOTH Live and Window.
+// Self-rescheduling timeouts (re-armed in finally) so a slow response can't
+// overlap the next poll.
+(async function pollStats() {
+    try {
+        await fetchData(true);
+    } finally {
+        setTimeout(pollStats, POLL_INTERVAL_MS);
+    }
+})();
 
-refreshRpsHistory();
-setInterval(refreshRpsHistory, HISTORY_INTERVAL_MS);
+(async function pollRpsHistory() {
+    try {
+        await refreshRpsHistory();
+    } finally {
+        setTimeout(pollRpsHistory, HISTORY_INTERVAL_MS);
+    }
+})();
 </script>
 {% endblock %}

@@ -490,6 +490,57 @@ impl ConcurrencyLimiter {
     }
 }
 
+/// RAII guard for one concurrency token. Returning the token happens on Drop,
+/// which covers every exit path uniformly: normal completion, handler panic,
+/// and — critically — future cancellation when the client disconnects before
+/// the response is produced. The old pattern (`next.run(...).await` followed by
+/// `return_tokens(...)`) silently leaked a token on each cancelled request.
+struct TokenGuard {
+    bucket: Arc<TokenBucket>,
+}
+
+impl Drop for TokenGuard {
+    fn drop(&mut self) {
+        let bucket = self.bucket.clone();
+        // Drop can't await; hand the refund to the runtime.
+        tokio::spawn(async move { bucket.return_tokens(1.0).await });
+    }
+}
+
+/// Body wrapper that holds the TokenGuard until the response body is fully
+/// streamed (or dropped). Without this, streaming responses returned their
+/// token as soon as the *headers* were ready — the upstream request was still
+/// running, so `--max-concurrent-requests` was never actually enforced for
+/// SSE traffic (the dominant workload).
+struct GuardedBodyStream {
+    inner: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+    >,
+    _guard: TokenGuard,
+}
+
+impl futures::Stream for GuardedBodyStream {
+    type Item = Result<axum::body::Bytes, axum::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+/// Attach the token guard to the response body so the token is released when
+/// the body finishes streaming, not when headers are produced.
+fn release_token_with_body(response: Response, guard: TokenGuard) -> Response {
+    let (parts, body) = response.into_parts();
+    let stream = GuardedBodyStream {
+        inner: Box::pin(body.into_data_stream()),
+        _guard: guard,
+    };
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
 /// Middleware function for concurrency limiting with optional queuing
 pub async fn concurrency_limit_middleware(
     State(app_state): State<Arc<AppState>>,
@@ -506,12 +557,12 @@ pub async fn concurrency_limit_middleware(
     // Try to acquire token immediately
     if token_bucket.try_acquire(1.0).await.is_ok() {
         debug!("Acquired token immediately");
+        let guard = TokenGuard {
+            bucket: token_bucket.clone(),
+        };
         let response = next.run(request).await;
-
-        // Return the token to the bucket
-        token_bucket.return_tokens(1.0).await;
-
-        response
+        // Token released when the response BODY completes (see TokenGuard).
+        release_token_with_body(response, guard)
     } else {
         // No tokens available, try to queue if enabled
         if let Some(queue_tx) = &app_state.concurrency_queue_tx {
@@ -545,12 +596,11 @@ pub async fn concurrency_limit_middleware(
                                 RouterMetrics::set_embeddings_queue_size(new_val as usize);
                             }
 
+                            let guard = TokenGuard {
+                                bucket: token_bucket.clone(),
+                            };
                             let response = next.run(request).await;
-
-                            // Return the token to the bucket
-                            token_bucket.return_tokens(1.0).await;
-
-                            response
+                            release_token_with_body(response, guard)
                         }
                         Ok(Err(status)) => {
                             warn!("Queue returned error status: {}", status);

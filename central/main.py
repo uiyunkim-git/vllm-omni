@@ -6,6 +6,9 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 from manager import CentralManager
 import logging
+import os
+
+logger = logging.getLogger(__name__)
 import httpx
 import json
 import random
@@ -47,6 +50,7 @@ class RegisterNodeRequest(BaseModel):
     host: str
     port: int
     gpus: List[dict]
+    version: Optional[dict] = None
 
 @app.get("/", response_class=HTMLResponse)
 async def read_dashboard(request: Request):
@@ -247,14 +251,25 @@ def _window_delta(key: str, window_s: int):
 _latest_scrape: dict = {}
 _SCRAPE_PERIOD_S = 5.0
 
+# Router endpoints — overridable so the service isn't hardwired to one host.
+ROUTER_METRICS_URL = os.environ.get("ROUTER_METRICS_URL", "http://143.248.74.105:29000/metrics")
+ROUTER_WORKERS_URL = os.environ.get("ROUTER_WORKERS_URL", "http://143.248.74.105:11434/workers")
+
+# Last successful /workers snapshot. When the /workers fetch fails we reuse
+# this instead of an empty dict — an empty dict made _is_live fail OPEN,
+# counting every stale (worker, instance) series as live and inflating the
+# aggregates for that cycle.
+_last_live_instances: Dict[str, str] = {}
+
 async def _collect_metrics():
     """One scrape cycle. Fetch /metrics + /workers, push samples to ring
     buffers, and update `_latest_scrape` for the API layer to read."""
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get("http://143.248.74.105:29000/metrics", timeout=3.0)
+            resp = await client.get(ROUTER_METRICS_URL, timeout=3.0)
             text = resp.text
-    except Exception:
+    except Exception as e:
+        logger.warning(f"metrics scrape failed ({ROUTER_METRICS_URL}): {e!r}")
         return
 
     raw = _parse_prometheus_full(text)
@@ -276,12 +291,17 @@ async def _collect_metrics():
     live_instances: Dict[str, str] = {}
     try:
         async with httpx.AsyncClient() as client:
-            wresp = await client.get("http://143.248.74.105:11434/workers", timeout=2.0)
+            wresp = await client.get(ROUTER_WORKERS_URL, timeout=2.0)
             for w in wresp.json().get("workers", []):
                 if w.get("url") and w.get("instance_id"):
                     live_instances[w["url"]] = w["instance_id"]
-    except Exception:
-        pass
+        _last_live_instances.clear()
+        _last_live_instances.update(live_instances)
+    except Exception as e:
+        # Reuse the previous snapshot rather than failing open (see comment on
+        # _last_live_instances above).
+        logger.warning(f"/workers fetch failed, using last-known live set: {e!r}")
+        live_instances = dict(_last_live_instances)
 
     def _is_live(labels: dict) -> bool:
         if not live_instances:
@@ -402,6 +422,14 @@ async def _collect_metrics():
         "retries_per_worker": retries_per_worker,
     })
 
+    # Prune ring-buffer keys whose series stopped updating beyond the maximum
+    # retention window. Without this, every removed/redeployed worker leaves
+    # its proc:/retry:/lat_*:/bucket:/cb_* keys behind forever — a slow memory
+    # leak plus phantom data for the windowed aggregations.
+    stale_cut = now - _BUFFER_SECONDS_MAX
+    for key in [k for k, dq in _metric_history.items() if not dq or dq[-1][0] < stale_cut]:
+        del _metric_history[key]
+
 
 async def _scrape_loop():
     while True:
@@ -478,7 +506,14 @@ async def get_prometheus_stats(window: int = 900, served_model_name: Optional[st
             if info.get("served_model_name") == served_model_name
         }
     else:
-        target_urls = set(lat_cnt_per_worker.keys()) | set(lat_sum_per_worker.keys())
+        # Include processed-map keys: a worker that served requests but has no
+        # latency series yet (or only failed traffic) must still count toward
+        # the per-worker tables and windowed sums.
+        target_urls = (
+            set(processed_map.keys())
+            | set(lat_cnt_per_worker.keys())
+            | set(lat_sum_per_worker.keys())
+        )
 
     # Cumulative sum/count over the chosen target workers.
     latency_sum = sum(lat_sum_per_worker.get(u, 0.0) for u in target_urls)
@@ -523,7 +558,18 @@ async def get_prometheus_stats(window: int = 900, served_model_name: Optional[st
 
     # (Ring-buffer pushes happen in _collect_metrics() — this endpoint is read-only.)
 
-    all_workers = sorted(set(list(processed_map.keys()) + list(decisions_map.keys()) + list(running_map.keys())))
+    # Union of: workers with counter series (traffic since router start),
+    # workers currently registered in the router (live_instances), and workers
+    # attached to known deployments. Counter series alone made every idle
+    # worker vanish from the UI after a router restart (fresh Prometheus
+    # registry → only workers that had received traffic appeared).
+    all_workers = sorted(
+        set(processed_map.keys())
+        | set(decisions_map.keys())
+        | set(running_map.keys())
+        | set(live_instances.keys())
+        | set(url_to_dep.keys())
+    )
     per_worker = []
     for w in all_workers:
         proc = processed_map.get(w, 0)
@@ -551,26 +597,45 @@ async def get_prometheus_stats(window: int = 900, served_model_name: Optional[st
         })
 
     # Windowed aggregates driven by ?window= and the served_model_name filter.
-    # Sum per-worker windowed delta AND track the matching duration from the
-    # same series — using a mismatched (e.g. global) denominator produced cards
-    # that disagreed with the chart by a factor of 2-3x.
     requests_window_total = 0
     duration_w = 0.0
-    for u in target_urls:
-        pd = _window_delta(f"proc:{u}", window)
-        if pd:
-            requests_window_total += int(pd[0])
-            duration_w = max(duration_w, pd[1])
+    retries_window_total = 0
+    if not served_model_name:
+        # Global view: use the SAME label-free aggregate series the RPS chart
+        # uses (global:requests / global:retries). Summing per-(worker,instance)
+        # series here made the card systematically LOWER than the chart: every
+        # worker re-registration mints a new instance ULID and resets that
+        # worker's per-URL ring buffer (counter-reset clear), dropping its
+        # contribution for up to a full window while the label-free aggregate
+        # keeps counting — the "71 rps card vs 165 rps chart" symptom.
+        gd = _window_delta("global:requests", window)
+        if gd:
+            requests_window_total = int(gd[0])
+            duration_w = gd[1]
+        grd = _window_delta("global:retries", window)
+        if grd:
+            retries_window_total = int(grd[0])
+    else:
+        # Per-model view: both the card and the chart use the same per-worker
+        # proc:{url} series, so they stay consistent within the tab.
+        for u in target_urls:
+            pd = _window_delta(f"proc:{u}", window)
+            if pd:
+                requests_window_total += int(pd[0])
+                duration_w = max(duration_w, pd[1])
+        for u in target_urls:
+            rd = _window_delta(f"retry:{u}", window)
+            if rd:
+                retries_window_total += int(rd[0])
     if duration_w <= 0:
         duration_w = float(window)
     rps_window = requests_window_total / duration_w
 
-    retries_window_total = 0
-    for u in target_urls:
-        rd = _window_delta(f"retry:{u}", window)
-        if rd:
-            retries_window_total += int(rd[0])
-    retry_rate_window = (retries_window_total / requests_window_total * 100) if requests_window_total > 0 else 0
+    # Share of upstream attempts that were retries — bounded [0, 100). The old
+    # retries/successes ratio had no ceiling (a burst of retries against few
+    # successes rendered as "355.83%").
+    _attempts_window = requests_window_total + retries_window_total
+    retry_rate_window = (retries_window_total / _attempts_window * 100) if _attempts_window > 0 else 0
 
     # Per-worker latency deltas summed across target_urls — respects served_model_name filter.
     lat_sum_window = 0.0
@@ -723,12 +788,23 @@ async def get_rps_history(window: int = 3600, served_model_name: Optional[str] =
     # entire visible range reflect "the rate when we first saw this worker",
     # which is the best estimate we have for the period before that.
     last_rates = [r[0][1] if r else 0.0 for r in worker_rates]
+    # Timestamp of the sample backing each carried rate. Seeded with the first
+    # rate's ts so pre-history buckets (b_end < first sample) are never treated
+    # as stale.
+    last_seen = [r[0][0] if r else 0.0 for r in worker_rates]
     ptrs = [0] * len(worker_rates)
+
+    # A series that stops updating (worker died / deregistered) must decay to 0
+    # instead of contributing its last observed rate forever — otherwise the
+    # chart keeps "phantom" throughput from dead workers for the rest of the
+    # window and reads higher than the cards.
+    _STALE_AFTER_S = 3 * _SCRAPE_INTERVAL
 
     def advance_rates_to(ts_target: float) -> None:
         for w_idx, rates in enumerate(worker_rates):
             while ptrs[w_idx] < len(rates) and rates[ptrs[w_idx]][0] <= ts_target:
                 last_rates[w_idx] = rates[ptrs[w_idx]][1]
+                last_seen[w_idx] = rates[ptrs[w_idx]][0]
                 ptrs[w_idx] += 1
 
     advance_rates_to(x_min)
@@ -738,7 +814,12 @@ async def get_rps_history(window: int = 3600, served_model_name: Optional[str] =
         b_start = x_min + i * bucket_size
         b_end = b_start + bucket_size
         advance_rates_to(b_end)
-        out.append({"ts": round(b_start, 3), "rps": round(sum(last_rates), 2)})
+        rps = sum(
+            rate
+            for rate, seen in zip(last_rates, last_seen)
+            if b_end - seen <= _STALE_AFTER_S
+        )
+        out.append({"ts": round(b_start, 3), "rps": round(rps, 2)})
 
     return {"window_seconds": window, "samples": out, "allowed": _ALLOWED_HISTORY}
 
@@ -886,8 +967,49 @@ async def stream_worker_job_logs(worker_id: str, job_id: str, offset: int = 0):
 
 @app.post("/api/internal/register_node")
 async def register_node(req: RegisterNodeRequest):
-    manager.register_worker(req.worker_id, req.host, req.port, req.gpus)
+    manager.register_worker(req.worker_id, req.host, req.port, req.gpus, req.version)
     return {"status": "ok"}
+
+@app.get("/api/version")
+async def get_versions():
+    """Target commit + each worker's reported commit and drift, for the UI/CI."""
+    import manager as manager_module
+    target = await manager.get_target_version()
+    return {
+        "target": target,
+        "branch": manager_module.WORKER_BRANCH,
+        "auto_update": manager_module.WORKER_AUTO_UPDATE,
+        "workers": manager.worker_version_status(target),
+    }
+
+@app.post("/api/workers/{worker_id}/update")
+async def update_worker(worker_id: str, branch: Optional[str] = None):
+    try:
+        return await manager.update_worker(worker_id, branch)
+    except Exception as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+@app.post("/api/workers/update_all")
+async def update_all_workers(branch: Optional[str] = None):
+    """Trigger self-update on every active worker that has drifted. Skips
+    workers currently serving a deployment (their GPUs are in use)."""
+    target = await manager.get_target_version()
+    busy = set()
+    for dep in manager.load_deployments():
+        for gid in dep.get("gpus", []):
+            busy.add(gid.rsplit("-", 1)[0])
+    results = {}
+    for w in manager.worker_version_status(target):
+        wid = w["worker_id"]
+        if w["status"] != "active" or not w.get("drift") or wid in busy:
+            results[wid] = "skipped"
+            continue
+        try:
+            await manager.update_worker(wid, branch)
+            results[wid] = "updating"
+        except Exception as e:
+            results[wid] = f"error: {e}"
+    return {"target": target, "results": results}
 
 async def health_check_loop():
     while True:
@@ -902,4 +1024,5 @@ async def startup_event():
     asyncio.create_task(health_check_loop())
     asyncio.create_task(manager.sync_p2c_workers())
     asyncio.create_task(_scrape_loop())
+    asyncio.create_task(manager.auto_update_loop())
 

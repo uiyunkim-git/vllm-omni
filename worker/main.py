@@ -51,12 +51,15 @@ async def startup_event():
 async def register_loop():
     while True:
         try:
-            gpus = manager.get_gpu_status()
+            # get_gpu_status shells out to docker (blocking, seconds) — run it in
+            # a thread so the heartbeat loop never stalls the event loop.
+            gpus = await asyncio.to_thread(manager.get_gpu_status)
             payload = {
                 "worker_id": WORKER_ID,
                 "host": WORKER_HOST,
                 "port": WORKER_PORT,
-                "gpus": gpus
+                "gpus": gpus,
+                "version": manager.get_version(),
             }
             async with httpx.AsyncClient() as client:
                 await client.post(f"{CENTRAL_URL}/api/internal/register_node", json=payload, timeout=5.0)
@@ -66,10 +69,28 @@ async def register_loop():
             
         await asyncio.sleep(10)
 
+@app.get("/api/internal/version")
+async def get_version():
+    return manager.get_version()
+
+class SelfUpdateRequest(BaseModel):
+    branch: Optional[str] = None
+
+@app.post("/api/internal/self_update")
+async def self_update(req: SelfUpdateRequest = SelfUpdateRequest()):
+    try:
+        return await asyncio.to_thread(manager.self_update, req.branch)
+    except Exception as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
 @app.post("/api/internal/deploy")
 async def deploy_model(req: WorkerDeployRequest):
     try:
-        dep = manager.deploy_model(req.dict())
+        # deploy_model shells out to docker compose (can take minutes on a cold
+        # image). Run in a thread so the event loop — and the register_loop
+        # heartbeat — keep running; otherwise central marks this worker offline
+        # mid-deploy.
+        dep = await asyncio.to_thread(manager.deploy_model, req.dict())
         return dep
     except Exception as e:
         import traceback
@@ -79,14 +100,14 @@ async def deploy_model(req: WorkerDeployRequest):
 
 @app.post("/api/internal/stop/{deploy_id}")
 async def stop_deployment(deploy_id: str):
-    success = manager.stop_deployment(deploy_id)
+    success = await asyncio.to_thread(manager.stop_deployment, deploy_id)
     if not success:
         raise HTTPException(status_code=404, detail="Deployment not found")
     return {"status": "success"}
 
 @app.post("/api/internal/stop_replica/{deploy_id}/{global_gpu_id}")
 async def stop_replica(deploy_id: str, global_gpu_id: str):
-    success = manager.stop_replica(deploy_id, global_gpu_id)
+    success = await asyncio.to_thread(manager.stop_replica, deploy_id, global_gpu_id)
     if not success:
         raise HTTPException(status_code=404, detail="Replica not found")
     return {"status": "success"}
