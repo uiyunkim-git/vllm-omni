@@ -146,7 +146,7 @@ function renderGPUs() {
     }
 
     if (gpus.length === 0) {
-        if (list) list.innerHTML = '<div class="col-12 text-muted">No active GPUs available. Make sure to accept pending endpoints.</div>';
+        if (list) list.innerHTML = '<p class="text-muted mb-0 p-2">No active GPUs available. Make sure to accept pending endpoints.</p>';
         return;
     }
 
@@ -167,42 +167,31 @@ function renderGPUs() {
             const avgMem = Math.round(group.gpus.reduce((s, g) => s + Math.round((g.memory_used / g.memory_total) * 100), 0) / group.gpus.length);
             const avgColor = avgMem > 85 ? '#ef4444' : avgMem > 60 ? '#f59e0b' : '#22c55e';
 
-            const gpuCards = group.gpus.map(gpu => {
+            const gpuRows = group.gpus.map(gpu => {
                 const memPercent = Math.min(100, Math.round((gpu.memory_used / gpu.memory_total) * 100));
                 const barColor = memPercent > 85 ? '#ef4444' : memPercent > 60 ? '#f59e0b' : '#3b82f6';
                 return `
-                    <div class="col-md-4 col-lg-3 mb-3">
-                        <div class="card h-100">
-                            <div class="card-body py-3 px-3">
-                                <div class="d-flex justify-content-between align-items-start mb-1">
-                                    <span class="fw-semibold small">GPU ${gpu.local_id}</span>
-                                    <span class="fw-bold small" style="color:${barColor}">${memPercent}%</span>
-                                </div>
-                                <div class="text-muted mb-2" style="font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${gpu.name}">${gpu.name}</div>
-                                <div class="progress mb-1" style="height:5px;border-radius:3px;background:#e5e7eb">
-                                    <div style="width:${memPercent}%;background:${barColor};height:100%;border-radius:3px;transition:width .4s"></div>
-                                </div>
-                                <div class="d-flex justify-content-between mt-1" style="font-size:.78rem;color:#9ca3af">
-                                    <span>${(gpu.memory_used / 1024).toFixed(1)} GB used</span>
-                                    <span>${(gpu.memory_total / 1024).toFixed(0)} GB total</span>
-                                </div>
-                                ${gpu.utilization != null ? `<div class="mt-1" style="font-size:.78rem;color:#9ca3af">Compute: ${gpu.utilization}%</div>` : ''}
-                            </div>
+                    <div class="gpu-list-row">
+                        <span class="fw-semibold small">GPU ${gpu.local_id}</span>
+                        <span class="gpu-list-name" title="${escapeHtml(gpu.name)}">${escapeHtml(gpu.name)}</span>
+                        <div class="gpu-list-membar" title="${(gpu.memory_used / 1024).toFixed(1)} GB / ${(gpu.memory_total / 1024).toFixed(0)} GB (${memPercent}%)">
+                            <div style="width:${memPercent}%;background:${barColor}"></div>
                         </div>
+                        <span class="gpu-list-mem"><span class="fw-semibold" style="color:${barColor}">${memPercent}%</span> · ${(gpu.memory_used / 1024).toFixed(1)} / ${(gpu.memory_total / 1024).toFixed(0)} GB</span>
+                        <span class="gpu-list-util">${gpu.utilization != null ? `Compute ${gpu.utilization}%` : '&mdash;'}</span>
                     </div>`;
             }).join('');
 
             list.innerHTML += `
-                <div class="col-12 mb-1">
-                    <div class="d-flex align-items-center gap-2 px-1 mb-2" style="cursor:pointer;user-select:none" data-wid="${escapeHtml(wid)}" onclick="toggleGpuGroup(this.dataset.wid)">
+                <div class="card gpu-list-group">
+                    <div class="gpu-list-head" data-wid="${escapeHtml(wid)}" onclick="toggleGpuGroup(this.dataset.wid)">
                         <i id="${gid}-icon" class="fa-solid fa-chevron-down" style="font-size:.72rem;color:#6b7280;transition:transform .2s;${iconTransform}"></i>
                         <span class="fw-semibold">${escapeHtml(group.name)}</span>
                         <span class="badge bg-secondary" style="font-size:.75rem">${group.gpus.length} GPU${group.gpus.length > 1 ? 's' : ''}</span>
                         <span style="font-size:.8rem;color:${avgColor};font-weight:600">${avgMem}% avg mem</span>
-                        <div style="flex:1;height:1px;background:#e2e8f0"></div>
                     </div>
-                    <div class="row" id="${gid}-cards" style="${cardsDisplay}">
-                        ${gpuCards}
+                    <div class="gpu-list-body" id="${gid}-cards" style="${cardsDisplay}">
+                        ${gpuRows}
                     </div>
                 </div>`;
         });
@@ -1030,35 +1019,34 @@ function renderEndpoints() {
         } else if (ep.status === 'active') {
             hasActive = true;
             const safeId = escapeHtml(ep.id);
+            const epUrlId = encodeURIComponent(ep.id);
             activeRows.push(`
-                <div class="col-md-6 col-xl-4 mb-3">
-                    <div class="card h-100" style="border-left:3px solid #22c55e">
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-start mb-1">
-                                <div>
-                                    <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:6px"></span>
-                                    <span class="fw-semibold">${escapeHtml(ep.name)}</span>
-                                    <span class="badge bg-success ms-1" style="font-size:.72rem">Active</span>
-                                </div>
-                                <span class="badge bg-secondary" style="font-size:.75rem">${ep.gpus.length} GPUs</span>
-                            </div>
-                            <div class="text-muted small mb-1 font-monospace">${escapeHtml(ep.host)}:${escapeHtml(ep.port)}</div>
-                            <div class="text-muted mb-3" style="font-size:.78rem;word-break:break-all">${safeId}</div>
-                            <div class="d-flex gap-2 flex-wrap">
-                                <button class="btn btn-sm btn-outline-secondary" data-id="${encodeURIComponent(ep.id)}" data-name="${encodeURIComponent(ep.name)}" onclick="renameEndpoint(decodeURIComponent(this.dataset.id), decodeURIComponent(this.dataset.name))">
-                                    <i class="fa-solid fa-pen me-1"></i>이름 변경
-                                </button>
-                                <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${escapeHtml(ep.id)}')">
-                                    <i class="fa-solid fa-trash me-1"></i>제거
-                                </button>
-                                <a href="/endpoints/${ep.id}/images" class="btn btn-sm btn-outline-primary">
-                                    <i class="fa-brands fa-docker me-1"></i>Images
-                                </a>
-                                <a href="/endpoints/${ep.id}/models" class="btn btn-sm btn-outline-success">
-                                    <i class="fa-solid fa-robot me-1"></i>Models
-                                </a>
-                            </div>
+                <div class="ep-row" style="border-left:3px solid #22c55e">
+                    <div class="ep-row-info">
+                        <div class="ep-row-title">
+                            <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span>
+                            <span class="fw-semibold">${escapeHtml(ep.name)}</span>
+                            <span class="badge bg-success" style="font-size:.72rem">Active</span>
+                            <span class="badge bg-secondary" style="font-size:.72rem">${ep.gpus.length} GPUs</span>
                         </div>
+                        <div class="ep-row-meta">
+                            <span class="text-muted font-monospace">${escapeHtml(ep.host)}:${escapeHtml(ep.port)}</span>
+                            <span class="text-muted font-monospace" style="word-break:break-all">${safeId}</span>
+                        </div>
+                    </div>
+                    <div class="ep-row-actions">
+                        <button class="btn btn-sm btn-outline-secondary" data-id="${encodeURIComponent(ep.id)}" data-name="${encodeURIComponent(ep.name)}" onclick="renameEndpoint(decodeURIComponent(this.dataset.id), decodeURIComponent(this.dataset.name))">
+                            <i class="fa-solid fa-pen me-1"></i>이름 변경
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="resetEndpoint('${escapeHtml(ep.id)}')">
+                            <i class="fa-solid fa-trash me-1"></i>제거
+                        </button>
+                        <a href="/endpoints/${epUrlId}/images" class="btn btn-sm btn-outline-primary">
+                            <i class="fa-brands fa-docker me-1"></i>Images
+                        </a>
+                        <a href="/endpoints/${epUrlId}/models" class="btn btn-sm btn-outline-success">
+                            <i class="fa-solid fa-robot me-1"></i>Models
+                        </a>
                     </div>
                 </div>`);
         }
@@ -1068,7 +1056,7 @@ function renderEndpoints() {
     if (!hasActive) {
         activeList.innerHTML = '<p class="text-muted p-3 mb-0">활성화된 엔드포인트가 없습니다.</p>';
     } else {
-        activeList.innerHTML = `<div class="row g-0 p-3">${activeRows.join('')}</div>`;
+        activeList.innerHTML = activeRows.join('');
     }
 
     if (activeId) {

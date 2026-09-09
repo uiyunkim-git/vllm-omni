@@ -73,6 +73,13 @@ async def register_loop():
 async def get_version():
     return manager.get_version()
 
+# Marker endpoint used to verify end-to-end that a self-update actually swapped
+# the running worker code (not just the reported version). Bump `marker` and
+# self-update; the new value only appears once the new code is live.
+@app.get("/api/internal/ping")
+async def ping():
+    return {"pong": True, "marker": "selfupdate-test-1"}
+
 class SelfUpdateRequest(BaseModel):
     branch: Optional[str] = None
 

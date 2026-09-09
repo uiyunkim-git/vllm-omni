@@ -84,6 +84,90 @@
             box-shadow: 0 0 0 2px #bfdbfe;
         }
 
+        /* GPU list rows (dashboard) */
+        .gpu-list-group { margin-bottom: 1rem; }
+        .gpu-list-head {
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            padding: .55rem .85rem;
+            cursor: pointer;
+            user-select: none;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .gpu-list-head:hover { background: #f9fafb; }
+        .gpu-list-body { }
+        /* flex-wrap (not a fixed-width grid) so rows shrink to the container
+           and wrap instead of forcing horizontal scroll on narrow screens. */
+        .gpu-list-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: .3rem .7rem;
+            padding: .5rem .85rem;
+            border-bottom: 1px solid #f1f3f5;
+        }
+        .gpu-list-row:last-child { border-bottom: none; }
+        .gpu-list-row:hover { background: #f9fafb; }
+        .gpu-list-row > :first-child { flex: 0 0 auto; }   /* "GPU {id}" label */
+        .gpu-list-name {
+            flex: 1 1 140px;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-size: .85rem;
+            color: #4b5563;
+        }
+        .gpu-list-membar {
+            flex: 1 1 80px;
+            max-width: 180px;
+            height: 6px;
+            border-radius: 3px;
+            background: #e5e7eb;
+            overflow: hidden;
+        }
+        .gpu-list-membar > div { height: 100%; border-radius: 3px; transition: width .4s; }
+        .gpu-list-mem {
+            flex: 0 0 auto;
+            font-size: .78rem;
+            color: #6b7280;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .gpu-list-util {
+            flex: 0 0 auto;
+            margin-left: auto;
+            font-size: .78rem;
+            color: #9ca3af;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        /* Active endpoint list rows */
+        .ep-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            padding: .75rem 1rem;
+            border-bottom: 1px solid #f1f3f5;
+        }
+        .ep-row:last-child { border-bottom: none; }
+        .ep-row:hover { background: #f9fafb; }
+        .ep-row-info { min-width: 0; flex: 1 1 260px; }
+        .ep-row-title { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+        .ep-row-meta {
+            display: flex;
+            gap: .75rem;
+            flex-wrap: wrap;
+            margin-top: .25rem;
+            font-size: .78rem;
+        }
+        .ep-row-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+
         /* Page content spacing */
         .page-content {
             padding-top: 1.5rem;
