@@ -991,17 +991,14 @@ async def update_worker(worker_id: str, branch: Optional[str] = None):
 
 @app.post("/api/workers/update_all")
 async def update_all_workers(branch: Optional[str] = None):
-    """Trigger self-update on every active worker that has drifted. Skips
-    workers currently serving a deployment (their GPUs are in use)."""
+    """Trigger self-update on every active, drifted worker. A self-update only
+    recreates the worker AGENT container — the vLLM model containers it manages
+    keep serving — so we do NOT skip workers that are currently serving."""
     target = await manager.get_target_version()
-    busy = set()
-    for dep in manager.load_deployments():
-        for gid in dep.get("gpus", []):
-            busy.add(gid.rsplit("-", 1)[0])
     results = {}
     for w in manager.worker_version_status(target):
         wid = w["worker_id"]
-        if w["status"] != "active" or not w.get("drift") or wid in busy:
+        if w["status"] != "active" or not w.get("drift"):
             results[wid] = "skipped"
             continue
         try:

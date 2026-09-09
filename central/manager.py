@@ -818,9 +818,9 @@ class CentralManager:
 
     async def auto_update_loop(self):
         """Opt-in (WORKER_AUTO_UPDATE=1). Rolls workers whose reported commit
-        differs from the target, ONE at a time, only when that worker has no
-        active deployments (so a serving GPU isn't yanked mid-inference), with a
-        per-worker cooldown. Never touches 'unmanaged' workers automatically —
+        differs from the target, ONE at a time, with a per-worker cooldown. A
+        self-update only recreates the agent (models keep serving), so serving
+        workers are included. Never touches 'unmanaged' workers automatically —
         those were hand-deployed and adopting them is an explicit operator action."""
         if not WORKER_AUTO_UPDATE:
             logger.info("Worker auto-update disabled (set WORKER_AUTO_UPDATE=1 to enable).")
@@ -832,16 +832,11 @@ class CentralManager:
                 target = await self.get_target_version()
                 if not target:
                     continue
-                # worker_id -> set of GPUs currently serving (skip busy workers)
-                busy = set()
-                for dep in self.load_deployments():
-                    for gid in dep.get("gpus", []):
-                        busy.add(gid.rsplit("-", 1)[0])
+                # A self-update only recreates the worker AGENT — the vLLM model
+                # containers keep serving — so serving workers are updated too.
                 for wid, w in self.get_workers().items():
                     if w.get("status") != "active":
                         continue
-                    if wid in busy:
-                        continue  # serving — don't restart under load
                     ver = self._worker_versions.get(wid, {})
                     commit = ver.get("commit")
                     if not commit or commit in ("unmanaged", "unknown") or commit == target:
