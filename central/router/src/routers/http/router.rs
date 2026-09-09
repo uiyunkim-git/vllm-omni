@@ -858,7 +858,25 @@ impl Router {
     ) -> Response {
         // TODO: currently the vllm worker is using in-memory state management, so this implementation has to fan out to all workers.
         // Eventually, we need to have router to manage the chat history with a proper database, will update this implementation accordingly.
-        let worker_urls = self.get_worker_urls();
+        //
+        // Fan out to HEALTHY workers only. A simple GET like /v1/models otherwise
+        // hangs whenever a dead/stale registration is tried first — each one
+        // burns the client's connect timeout before the loop reaches a live
+        // worker. Fall back to all workers only if none are currently healthy.
+        let worker_urls = {
+            let healthy: Vec<String> = self
+                .worker_registry
+                .get_all()
+                .into_iter()
+                .filter(|w| w.is_healthy())
+                .map(|w| w.url().to_string())
+                .collect();
+            if healthy.is_empty() {
+                self.get_worker_urls()
+            } else {
+                healthy
+            }
+        };
         if worker_urls.is_empty() {
             return (StatusCode::SERVICE_UNAVAILABLE, "No available workers").into_response();
         }
@@ -893,6 +911,10 @@ impl Router {
                     }
                 }
             }
+
+            // Cap simple fan-out probes so one slow worker can't stall the loop
+            // (the shared client's default timeout is 30 min, meant for inference).
+            request_builder = request_builder.timeout(Duration::from_secs(15));
 
             match otel_http::send_client_request(
                 request_builder,

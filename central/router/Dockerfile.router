@@ -2,7 +2,9 @@
 FROM rustlang/rust:nightly-bullseye as rust-builder
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+# -o Acquire::Check-Valid-Until=false: bullseye is archived/oldstable, so its
+# Release files' valid-until has passed — apt would reject them as "expired".
+RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
