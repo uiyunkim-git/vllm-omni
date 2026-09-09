@@ -143,33 +143,47 @@ class WorkerManager:
             subprocess.run(["docker", "rm", "-f", updater_name],
                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # Point git at the real git dir when it lives outside the worktree
-            # (submodule / linked worktree). For a plain clone, git reads /repo/.git.
-            git_env = "export GIT_DIR=/gitdir GIT_WORK_TREE=/repo" if HOST_GIT_DIR else "cd /repo"
+            # Mount the repo (and, for a submodule/worktree, the real git dir) at
+            # the SAME absolute path inside the updater as on the host. This is
+            # essential for docker-out-of-docker compose: the compose CLI resolves
+            # relative volumes (./worker/...) and the build context against the
+            # project directory, then hands those ABSOLUTE paths to the host
+            # daemon — so the path must be valid both inside the updater (for the
+            # CLI's own reads) and on the host (for the bind mounts). Mounting at
+            # /repo broke this: the host has no /repo, so `up --build` failed.
+            rd = shlex.quote(HOST_REPO_DIR)
+            gd = shlex.quote(HOST_GIT_DIR) if HOST_GIT_DIR else ""
+            lock = shlex.quote(os.path.join(HOST_REPO_DIR, "worker/data/.worker_version.lock"))
+            vfile = shlex.quote(os.path.join(HOST_REPO_DIR, "worker/data/.worker_version"))
+            git_env = f"export GIT_DIR={gd} GIT_WORK_TREE={rd}" if HOST_GIT_DIR else f"cd {rd}"
+            gd_safe = f"git config --global --add safe.directory {gd}" if HOST_GIT_DIR else ""
+            branch_q = shlex.quote(branch)
             script = f"""set -e
+# Always drop the lock on exit so a FAILED update never leaves the worker stuck
+# reporting updating=true (the version file is only written on success).
+trap 'rm -f {lock}' EXIT
 {git_env}
-git config --global --add safe.directory /repo
-git config --global --add safe.directory /gitdir
-touch /repo/worker/data/.worker_version.lock
-git fetch --prune origin {shlex.quote(branch)}
-git checkout -f {shlex.quote(branch)}
-git reset --hard origin/{shlex.quote(branch)}
+git config --global --add safe.directory {rd}
+{gd_safe}
+touch {lock}
+cd {rd}
+export PWD={rd}
+git fetch --prune origin {branch_q}
+git checkout -f {branch_q}
+git reset --hard origin/{branch_q}
 NEWSHA=$(git rev-parse HEAD)
 SUBTREE=$(git rev-parse HEAD:worker || echo "")
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-# compose bind-mount sources are HOST paths → PWD must be the host repo dir.
-export PWD={shlex.quote(HOST_REPO_DIR)}
-docker compose --project-directory {shlex.quote(HOST_REPO_DIR)} -f /repo/docker-compose.worker.yml up -d --build worker
-printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTREE" "$TS" > /repo/worker/data/.worker_version
-rm -f /repo/worker/data/.worker_version.lock
+docker compose --project-directory {rd} -f {rd}/docker-compose.worker.yml up -d --build worker
+printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTREE" "$TS" > {vfile}
 """
             cmd = [
                 "docker", "run", "-d", "--rm", "--name", updater_name,
                 "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "-v", f"{HOST_REPO_DIR}:/repo",
+                "-v", f"{HOST_REPO_DIR}:{HOST_REPO_DIR}",
             ]
             if HOST_GIT_DIR:
-                cmd += ["-v", f"{HOST_GIT_DIR}:/gitdir"]
+                cmd += ["-v", f"{HOST_GIT_DIR}:{HOST_GIT_DIR}"]
             cmd += ["--entrypoint", "sh", image, "-c", script]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
