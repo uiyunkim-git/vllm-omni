@@ -32,7 +32,8 @@ services:
       - DYN_SYSTEM_PORT={{ system_port }}
       - DYN_TCP_RESPONSE_STREAM_HOST={{ advertise_host }}
       - DYN_TCP_RESPONSE_STREAM_PORT={{ resp_port }}
-      # request-plane listener; without this Dynamo binds an OS-assigned port (unfirewallable)
+      # request-plane listener: bind+advertise host, fixed port (else OS-assigned, unfirewallable)
+      - DYN_TCP_RPC_HOST={{ advertise_host }}
       - DYN_TCP_RPC_PORT={{ rpc_port }}
       - DYN_EVENT_PLANE_HOST={{ advertise_host }}
       - DYN_LOG={{ dyn_log | default('info') }}

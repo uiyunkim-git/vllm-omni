@@ -33,9 +33,11 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
 | ZMQ KV 이벤트 | `port + 44000` (65xxx) | `--kv-events-config`; `DYN_EVENT_PLANE_HOST`로 광고 |
 
 광고 주소(`advertise_host`)는 central이 그 워커에 도달하는 IP(`worker.host`)를 그대로 전달.
-**방화벽(각 워커 호스트, neuron→워커 인바운드): 31000-33999, 63000-65999/tcp 허용 필요.** 프론트엔드는 등록 시
-워커 system 포트에서 모델 정보를 HTTP로 가져오고(`fetching http://host:31xxx/...`), 요청은 33xxx로 보낸다 — heart3에서
-31xxx가 필터링되어 임베딩 워커가 etcd에는 등록됐지만 프론트 등록이 계속 실패했다(2026-09-11).
+**방화벽**: vLLM 컨테이너는 `-p` 퍼블리시라 Docker가 호스트 방화벽(FORWARD)을 스스로 열어 줬지만, host 네트워크의 Dynamo
+워커는 INPUT 체인을 타서 기본-DROP(ufw) 호스트(heart3·hubble)에서는 리슨 중이어도 timeout이 났다(2026-09-11: 프론트가
+`fetching http://host:31xxx/...` 실패 → 임베딩 워커가 etcd에는 있는데 등록 불가). 해결: 워커 에이전트가 배포 시 그 인스턴스의
+포트 4개에 `iptables -I INPUT ACCEPT`를 멱등으로 넣는다(`_ensure_host_ports_open`, 호스트 iptables를 nsenter로 실행 —
+Docker가 퍼블리시 포트에 하는 것과 같은 효과). 재부팅 후에는 재배포/재시작 시 다시 적용된다.
 
 ### 배포 요청 (central `/api/deploy`)
 ```json

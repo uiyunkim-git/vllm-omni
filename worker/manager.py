@@ -223,6 +223,36 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         with open(deps_file, "w") as f:
             json.dump(deps, f, indent=2)
 
+    def _ensure_host_ports_open(self, ports: list, comment: str = "vllm-omni-dynamo") -> None:
+        """Make a host-network worker's ports reachable from other hosts.
+
+        vLLM containers were published with `-p host:container`, and Docker
+        itself inserts the firewall rules that let that traffic in (FORWARD
+        chain). A Dynamo worker listens directly on the host network, so
+        nothing does that for it — on hosts with a default-DROP INPUT policy
+        (ufw) its ports time out even though the process is listening. Do what
+        Docker does: insert an INPUT ACCEPT for each port, idempotently. The
+        HOST's own iptables binary is run via nsenter so it lands in the same
+        ruleset (nft or legacy) the host already uses.
+        """
+        rules = " ; ".join(
+            f"iptables -C INPUT -p tcp --dport {p} -j ACCEPT -m comment --comment {comment} 2>/dev/null "
+            f"|| iptables -I INPUT 1 -p tcp --dport {p} -j ACCEPT -m comment --comment {comment}"
+            for p in ports
+        )
+        cmd = [
+            "docker", "run", "--rm", "--privileged", "--pid=host", "--net=host",
+            "alpine:3.20", "nsenter", "-t", "1", "-m", "-u", "-n", "-i", "--", "sh", "-c", rules,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                logger.warning(f"host firewall open for {ports} failed: {(r.stderr or r.stdout).strip()[:300]}")
+            else:
+                logger.info(f"host firewall: INPUT ACCEPT ensured for tcp {ports}")
+        except Exception as e:
+            logger.warning(f"host firewall open for {ports} skipped: {e}")
+
     def _default_advertise_host(self) -> str:
         """IP the Dynamo frontend should dial for this host. Central passes it
         explicitly (the address it already reaches this worker at); fall back to
@@ -397,6 +427,15 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
             raise RuntimeError(f"docker compose failed for {node_name} on host port {current_port + HOST_PORT_OFFSET}: {details or 'no output'}")
 
         nodes.append({"name": node_name, "port": current_port})
+
+        if engine == "dynamo":
+            # Same effect as Docker's published-port rules for the vLLM path.
+            self._ensure_host_ports_open([
+                current_port + DYNAMO_SYSTEM_PORT_OFFSET,
+                current_port + DYNAMO_RPC_PORT_OFFSET,
+                current_port + DYNAMO_RESP_PORT_OFFSET,
+                current_port + DYNAMO_KV_PORT_OFFSET,
+            ])
 
         # current_port may have advanced past the originally allocated value via
         # the address-in-use retry loop above; persist the port actually bound,
