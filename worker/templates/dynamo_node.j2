@@ -1,0 +1,92 @@
+version: '3.9'
+
+# Dynamo data-plane worker: `python -m dynamo.vllm` (vLLM engine, NO uvicorn API server).
+# Registers itself in etcd; the Dynamo frontend discovers it and talks to it over the
+# TCP request plane. Host networking so the advertised ports are the real ones:
+#   system_port  = health/metrics (/health, /live, /metrics incl. vllm:* engine metrics)
+#   resp_port    = TCP response-stream server (frontend -> worker request plane)
+#   kv_port      = ZMQ KV-event publisher (frontend KV-aware router subscribes)
+services:
+  {{ node_name }}:
+    image: {{ image }}
+    container_name: {{ node_name }}
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    shm_size: '16gb'
+    # The image runs as uid 1000 (no passwd entry for ours -> torch getpass() KeyError);
+    # root can read our HF cache and needs no passwd juggling.
+    user: "0:0"
+    environment:
+      - HOME=/root
+      - HF_HOME=/root/.cache/huggingface
+      - VLLM_NO_USAGE_STATS=1
+      - DO_NOT_TRACK=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # deterministic hashing across processes: required for KV-event radix trees
+      - PYTHONHASHSEED=0
+      - DYN_DISCOVERY_BACKEND=etcd
+      - ETCD_ENDPOINTS={{ etcd_endpoints }}
+      - DYN_NAMESPACE={{ namespace }}
+      - DYN_SYSTEM_PORT={{ system_port }}
+      - DYN_TCP_RESPONSE_STREAM_HOST={{ advertise_host }}
+      - DYN_TCP_RESPONSE_STREAM_PORT={{ resp_port }}
+      - DYN_EVENT_PLANE_HOST={{ advertise_host }}
+      - DYN_LOG={{ dyn_log | default('info') }}
+{% if huggingface_token %}
+      - HUGGING_FACE_HUB_TOKEN={{ huggingface_token }}
+      - HF_TOKEN={{ huggingface_token }}
+{% endif %}
+    volumes:
+      - "{{ host_cache_dir }}:/root/.cache/huggingface"
+    entrypoint: ["python3", "-m", "dynamo.vllm"]
+    command:
+      - --model
+      - "{{ model_name }}"
+{% if served_model_name %}
+      - --served-model-name
+      - "{{ served_model_name }}"
+{% endif %}
+{% if is_embedding %}
+      - --embedding-worker
+      - --runner
+      - pooling
+{% endif %}
+{% if tensor_parallel_size > 1 %}
+      - --tensor-parallel-size
+      - "{{ tensor_parallel_size }}"
+{% endif %}
+{% if max_model_len %}
+      - --max-model-len
+      - "{{ max_model_len }}"
+{% endif %}
+{% if gpu_memory_util %}
+      - --gpu-memory-utilization
+      - "{{ gpu_memory_util }}"
+{% endif %}
+{% if not is_embedding %}
+      - --block-size
+      - "{{ block_size }}"
+      - --kv-events-config
+      - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{{ kv_port }}","enable_kv_cache_events":true}'
+{% endif %}
+{% if reasoning_parser %}
+      - --dyn-reasoning-parser
+      - "{{ reasoning_parser }}"
+{% endif %}
+{% if tool_call_parser %}
+      - --dyn-tool-call-parser
+      - "{{ tool_call_parser }}"
+{% endif %}
+{% if extra_args %}
+{% for arg in extra_args %}
+      - "{{ arg }}"
+{% endfor %}
+{% endif %}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: {{ gpu_ids | tojson }}

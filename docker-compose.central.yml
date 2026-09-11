@@ -93,6 +93,74 @@ services:
     networks:
       vllm_network:
 
+  # ── Dynamo data plane ────────────────────────────────────────────────────
+  # etcd: service discovery for `dynamo.vllm` workers on every host (they register
+  # here; the frontend watches it). Single node is fine — it holds only leases.
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.21
+    container_name: vllm_omni_etcd
+    restart: unless-stopped
+    command: >
+      /usr/local/bin/etcd
+      --name vllm-omni
+      --data-dir /etcd-data
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://143.248.74.105:2379
+      --listen-peer-urls http://0.0.0.0:2380
+      --auto-compaction-retention 1h
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      vllm_network:
+
+  # Dynamo frontend: OpenAI-compatible ingress (Rust) + KV-aware router over all
+  # dynamo workers discovered in etcd. Replaces vllm_router_p2c once every model
+  # has moved to engine=dynamo (then this takes :11434). Same tailscale-route
+  # trick as the router so workers reachable only over the tailnet still work.
+  dynamo_frontend:
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
+    container_name: vllm_omni_dynamo_frontend
+    restart: unless-stopped
+    depends_on:
+      - tailscale
+      - etcd
+    cap_add:
+      - NET_ADMIN
+    user: "0:0"
+    ports:
+      - "${DYNAMO_FRONTEND_PORT:-11435}:8080"
+    environment:
+      - HOME=/root
+      - DYN_DISCOVERY_BACKEND=etcd
+      - ETCD_ENDPOINTS=http://etcd:2379
+      - DYN_NAMESPACE=${DYNAMO_NAMESPACE:-dynamo}
+      - DYN_LOG=${DYNAMO_LOG:-info}
+      - TAILSCALE_GATEWAY_HOST=tailscale
+      - TAILSCALE_SUBNET=100.64.0.0/10
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        GW=$$(getent hosts $${TAILSCALE_GATEWAY_HOST} | awk '{print $$1}')
+        if [ -n "$$GW" ]; then
+          echo "Adding route $${TAILSCALE_SUBNET} via $$GW (tailscale gateway)"
+          ip route replace $${TAILSCALE_SUBNET} via $$GW || echo "route add failed (non-fatal)"
+        else
+          echo "WARN: tailscale host not resolvable, skipping route setup"
+        fi
+        exec "$$@"
+      - "--"
+    command: >
+      python3 -m dynamo.frontend
+      --http-port 8080
+      --router-mode ${DYNAMO_ROUTER_MODE:-kv}
+      --kv-cache-block-size ${DYNAMO_KV_BLOCK_SIZE:-64}
+      --migration-limit ${DYNAMO_MIGRATION_LIMIT:-3}
+    networks:
+      vllm_network:
+
   central:
     build:
       context: ./central
@@ -112,6 +180,11 @@ services:
       - WORKER_BRANCH=${WORKER_BRANCH:-main}
       # Opt-in rolling auto-update of drifted, idle workers. Default OFF.
       - WORKER_AUTO_UPDATE=${WORKER_AUTO_UPDATE:-0}
+      # Dynamo data plane (engine=dynamo deployments)
+      - DYNAMO_ETCD_ENDPOINTS=${DYNAMO_ETCD_ENDPOINTS:-http://143.248.74.105:2379}
+      - DYNAMO_NAMESPACE=${DYNAMO_NAMESPACE:-dynamo}
+      - DYNAMO_KV_BLOCK_SIZE=${DYNAMO_KV_BLOCK_SIZE:-64}
+      - DYNAMO_FRONTEND_URL=${DYNAMO_FRONTEND_URL:-http://143.248.74.105:11435}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./central/main.py:/app/main.py
@@ -123,6 +196,7 @@ services:
 volumes:
   tailscale-state:
   router-state:
+  etcd-data:
 
 networks:
   vllm_network:

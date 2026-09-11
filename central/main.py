@@ -37,6 +37,10 @@ class DeployRequest(BaseModel):
     gpu_util: Optional[float] = 0.9
     extra_args: Optional[str] = None
     vllm_image: Optional[str] = None
+    # engine == "dynamo": Dynamo-side parsers (inferred from the model name when omitted)
+    reasoning_parser: Optional[str] = None
+    tool_call_parser: Optional[str] = None
+    block_size: Optional[int] = None
 
 class ConfigSaveRequest(BaseModel):
     name: str

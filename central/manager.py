@@ -15,6 +15,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 logger = logging.getLogger(__name__)
 
 P2C_ROUTER_URL = os.environ.get("P2C_ROUTER_URL", "http://143.248.74.105:11434")
+# Dynamo data plane: etcd every dynamo worker registers in (must be reachable from
+# every worker host), the discovery namespace, and the KV block size shared by the
+# frontend (--kv-cache-block-size) and every worker (--block-size).
+DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
+DYNAMO_NAMESPACE = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+DYNAMO_KV_BLOCK_SIZE = int(os.environ.get("DYNAMO_KV_BLOCK_SIZE", "64"))
 
 # CI/CD self-update config.
 HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "")          # host path of the git checkout
@@ -225,6 +231,37 @@ class CentralManager:
                             logger.error(f"Rollback of {deploy_id} on worker {wid} failed: {e}")
             raise
 
+    # ── Dynamo data plane ────────────────────────────────────────────────────
+    # engine == "dynamo": the worker runs `python -m dynamo.vllm` (no uvicorn),
+    # registers in etcd, and the Dynamo frontend routes to it. No P2C router
+    # registration, plain-HTTP health on the worker's system port.
+    @staticmethod
+    def _infer_parsers(model: str) -> tuple:
+        m = (model or "").lower()
+        if "gpt-oss" in m:
+            return "gpt_oss", "harmony"
+        if "gemma-4" in m or "gemma4" in m:
+            return "gemma4", "gemma4"
+        if "qwen3" in m:
+            return "qwen3", "hermes"
+        if "deepseek-v4" in m:
+            return "deepseek_v4", "deepseek_v4"
+        return None, None
+
+    def _dynamo_fields(self, req: dict, worker: dict) -> dict:
+        if req.get("engine") != "dynamo":
+            return {}
+        rp, tp = self._infer_parsers(req.get("model", ""))
+        return {
+            "advertise_host": worker["host"],
+            "etcd_endpoints": DYNAMO_ETCD_ENDPOINTS,
+            "namespace": DYNAMO_NAMESPACE,
+            "reasoning_parser": req.get("reasoning_parser") or rp,
+            "tool_call_parser": req.get("tool_call_parser") or tp,
+            "block_size": req.get("block_size") or DYNAMO_KV_BLOCK_SIZE,
+            "is_embedding": bool(req.get("is_embedding")),
+        }
+
     async def _deploy_model_inner(self, req: dict, deploy_id: str, touched_wids: set):
         # Group requested GPUs by worker
         worker_assignments = {}
@@ -290,9 +327,10 @@ class CentralManager:
                             "max_len": req.get("max_len"),
                             "gpu_util": req.get("gpu_util"),
                             "extra_args": req.get("extra_args"),
-                            "vllm_image": req.get("vllm_image") or None
+                            "vllm_image": req.get("vllm_image") or None,
+                            **self._dynamo_fields(req, worker),
                         }
-                        
+
                         touched_wids.add(wid)
                         resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                         if resp.status_code != 200:
@@ -331,9 +369,10 @@ class CentralManager:
                     "max_len": req.get("max_len"),
                     "gpu_util": req.get("gpu_util"),
                     "extra_args": req.get("extra_args"),
-                    "vllm_image": req.get("vllm_image") or None
+                    "vllm_image": req.get("vllm_image") or None,
+                    **self._dynamo_fields(req, worker),
                 }
-                
+
                 touched_wids.add(wid)
                 resp = await client.post(worker_url, json=worker_req, timeout=600.0)
                 if resp.status_code != 200:
@@ -570,6 +609,8 @@ class CentralManager:
         startup behind every flaky network/router-warmup case."""
         deps = self.load_deployments()
         for dep in deps:
+            if dep.get("engine", "vllm") == "dynamo":
+                continue  # discovered via etcd, not the P2C router
             for node in dep.get("nodes", []):
                 if node.get("is_healthy"):
                     asyncio.create_task(self._p2c_register(node["host"], node["port"]))
@@ -585,6 +626,15 @@ class CentralManager:
         """
         engine = dep.get("engine", "vllm")
         health_path = "/health" if engine == "vllm" else "/"
+
+        if engine == "dynamo":
+            # Worker system port (plain HTTP): /health reports {"status":"ready"} only once
+            # the engine is loaded and its `generate` endpoint is registered in etcd.
+            try:
+                resp = await client.get(f"http://{host}:{api_port}/health", timeout=8.0)
+                return resp.status_code == 200 and resp.json().get("status") == "ready"
+            except Exception:
+                return False
 
         try:
             resp = await client.get(f"https://{host}:{api_port}{health_path}", timeout=8.0)
@@ -654,7 +704,9 @@ class CentralManager:
             async def probe(key, dep):
                 host, api_port, served_name = key
                 async with sem:
-                    other = await self._node_serves_other_model(client, host, api_port, served_name)
+                    other = None
+                    if dep.get("engine", "vllm") != "dynamo":
+                        other = await self._node_serves_other_model(client, host, api_port, served_name)
                     if other is not None:
                         logger.info(
                             f"Node {host}:{api_port} now serves {other!r}, not {served_name!r} "
@@ -684,6 +736,8 @@ class CentralManager:
                 for node_idx, node in enumerate(dep.get("nodes", [])):
                     key = (node["host"], node["port"] + 40000, served_name)
                     res = results.get(key)
+                    if res == "other_model" and dep.get("engine", "vllm") == "dynamo":
+                        res = None  # never computed for dynamo nodes
                     if res is None:
                         # Node appeared after the probe pass — next cycle covers it.
                         if not node.get("is_healthy"):
@@ -703,12 +757,15 @@ class CentralManager:
                             node["is_healthy"] = False
                             node["_fail_count"] = 0
                             changed = True
-                            to_deregister.append((node["host"], node["port"]))
+                            if dep.get("engine", "vllm") != "dynamo":
+                                to_deregister.append((node["host"], node["port"]))
                     elif is_healthy:
                         if not node.get("is_healthy"):
                             node["is_healthy"] = True
                             changed = True
-                            to_register.append((node["host"], node["port"]))
+                            # dynamo workers are discovered via etcd — nothing to register
+                            if dep.get("engine", "vllm") != "dynamo":
+                                to_register.append((node["host"], node["port"]))
                         node["_fail_count"] = 0
 
                     if not node.get("is_healthy"):

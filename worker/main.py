@@ -36,6 +36,13 @@ class WorkerDeployRequest(BaseModel):
     gpu_util: Optional[float] = 0.9
     extra_args: Optional[str] = None
     vllm_image: Optional[str] = None
+    # engine == "dynamo" only (see templates/dynamo_node.j2)
+    advertise_host: Optional[str] = None      # IP the Dynamo frontend reaches this host at
+    etcd_endpoints: Optional[str] = None      # e.g. http://143.248.74.105:2379
+    namespace: Optional[str] = "dynamo"
+    reasoning_parser: Optional[str] = None    # --dyn-reasoning-parser (gpt_oss, gemma4, qwen3, ...)
+    tool_call_parser: Optional[str] = None    # --dyn-tool-call-parser (harmony, gemma4, hermes, ...)
+    block_size: Optional[int] = 64            # must match the frontend's --kv-cache-block-size
 
 class PullImageRequest(BaseModel):
     image: str

@@ -44,6 +44,11 @@ HOST_GIT_DIR = os.environ.get("HOST_GIT_DIR", "")
 # Written by the updater after a successful pull; read back to report version.
 VERSION_FILE = os.path.join(DATA_DIR, ".worker_version")
 HOST_PORT_OFFSET = 40000
+
+# Dynamo data plane (engine == "dynamo"): worker image and the etcd the frontend uses
+# for discovery. Central normally passes both explicitly in the deploy request.
+DYNAMO_IMAGE = os.environ.get("DYNAMO_IMAGE", "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2")
+DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
 # Internal ports start at 21001 so host ports (internal + 40000) land at 61001+,
 # above the OS ephemeral port range (32768-60999) to avoid bind conflicts.
 _PORT_START = 21001
@@ -211,6 +216,13 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         with open(deps_file, "w") as f:
             json.dump(deps, f, indent=2)
 
+    def _default_advertise_host(self) -> str:
+        """IP the Dynamo frontend should dial for this host. Central passes it
+        explicitly (the address it already reaches this worker at); fall back to
+        the same value the heartbeat advertises."""
+        import socket
+        return os.environ.get("WORKER_HOST") or socket.gethostbyname(socket.gethostname())
+
     def deploy_model(self, req: dict):
         # Serialize deploys/stops: they read-modify-write local_deployments.json
         # and allocate ports from a snapshot of it.
@@ -221,8 +233,10 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         deploy_id = req["deploy_id"]
         replica_id = req["replica_id"]
 
+        engine = req.get("engine", "vllm")
         # Check that the requested image exists locally before doing anything else
-        requested_image = req.get("vllm_image") or "vllm/vllm-openai:latest"
+        default_image = DYNAMO_IMAGE if engine == "dynamo" else "vllm/vllm-openai:latest"
+        requested_image = req.get("vllm_image") or default_image
         check = subprocess.run(
             ["docker", "image", "inspect", requested_image],
             capture_output=True
@@ -259,10 +273,12 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         used_ports.add(current_port)
         ports.append(current_port)
         
-        engine = req.get("engine", "vllm")
         if engine == "ollama":
             template = self.env.get_template("ollama_node.j2")
             node_name = f"ollama_{replica_id}"
+        elif engine == "dynamo":
+            template = self.env.get_template("dynamo_node.j2")
+            node_name = f"dynamo_{replica_id}"
         else:
             template = self.env.get_template("vllm_node.j2")
             node_name = f"vllm_{replica_id}"
@@ -318,7 +334,23 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
                 host_cert_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.crt"),
                 host_key_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.key"),
                 extra_args=shlex.split(req.get("extra_args") or ""),
-                vllm_image=req.get("vllm_image") or "vllm/vllm-openai:latest"
+                vllm_image=req.get("vllm_image") or "vllm/vllm-openai:latest",
+                # ── dynamo engine only ──────────────────────────────────────
+                # Host networking; three ports per instance, all derived from the
+                # one allocated `port` so the existing allocator/conflict logic
+                # keeps working:  system(health/metrics)=+40000 (same slot the
+                # vLLM API used), response-stream=+42000, kv-events=+44000.
+                image=requested_image,
+                system_port=port + HOST_PORT_OFFSET,
+                resp_port=port + HOST_PORT_OFFSET + 2000,
+                kv_port=port + HOST_PORT_OFFSET + 4000,
+                advertise_host=req.get("advertise_host") or self._default_advertise_host(),
+                etcd_endpoints=req.get("etcd_endpoints") or DYNAMO_ETCD_ENDPOINTS,
+                namespace=req.get("namespace") or "dynamo",
+                reasoning_parser=req.get("reasoning_parser"),
+                tool_call_parser=req.get("tool_call_parser"),
+                block_size=req.get("block_size") or 64,
+                is_embedding=bool(req.get("is_embedding")),
             )
             with open(compose_path, "w") as f:
                 f.write(content)
