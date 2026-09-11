@@ -27,11 +27,11 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
 ### 워커 포트 (인스턴스당 3개, 기존 할당 슬롯 `port`에서 파생)
 | 용도 | 포트 | 비고 |
 |---|---|---|
-| system (health/metrics) | `port + 40000` (= 기존 vLLM API 슬롯, 61xxx) | `/health` → `{"status":"ready"}`, `/metrics`에 `vllm:*` 포함 |
+| system (health/metrics) | `port + 10000` (31xxx) | `/health` → `{"status":"ready"}`, `/metrics`에 `vllm:*` 포함. Dynamo가 `DYN_SYSTEM_PORT`를 i16으로 파싱해 32767 이하만 가능 |
 | TCP 응답 스트림(요청 플레인) | `port + 42000` (63xxx) | `DYN_TCP_RESPONSE_STREAM_HOST/PORT`로 고정·광고 |
 | ZMQ KV 이벤트 | `port + 44000` (65xxx) | `--kv-events-config`; `DYN_EVENT_PLANE_HOST`로 광고 |
 
-광고 주소(`advertise_host`)는 central이 그 워커에 도달하는 IP(`worker.host`)를 그대로 전달. 방화벽은 61xxx·63xxx·65xxx 인바운드 허용 필요.
+광고 주소(`advertise_host`)는 central이 그 워커에 도달하는 IP(`worker.host`)를 그대로 전달. 방화벽은 31xxx·63xxx·65xxx 인바운드 허용 필요.
 
 ### 배포 요청 (central `/api/deploy`)
 ```json
@@ -55,7 +55,7 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
 
 ## 단계
 - [x] Phase 1 — 인프라: etcd + 프론트엔드(:11435) compose, 워커 `engine=dynamo` 경로, central 전달/health/등록 스킵.
-- [x] Phase 1 검증: neuron GPU4에 gpt-oss(dynamo) central 배포 → 프론트 `/v1/models` 노출 → believe 벤치.
+- [x] Phase 1 검증: neuron GPU4에 gpt-oss(dynamo) central 배포 → 프론트 `/v1/models` 노출 → central health → believe 벤치 (23.4 req/s, 파일럿과 동일).
 - [ ] Phase 2 — neuron의 gpt-oss 전부 dynamo로(GPU0,1,2,3,4), 라우터 경유 vLLM 인스턴스 제거.
 - [ ] Phase 3 — central 메트릭/UI를 `dynamo_frontend_*` 기준으로; 워커 목록은 etcd/프론트 기준.
 - [ ] Phase 4 — 타 호스트(hubble/heart3/cubis/kbds) 이미지 풀 + 임베딩·기타 모델 이전; 프론트를 tailscale netns로.

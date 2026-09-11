@@ -21,6 +21,16 @@ P2C_ROUTER_URL = os.environ.get("P2C_ROUTER_URL", "http://143.248.74.105:11434")
 DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
 DYNAMO_NAMESPACE = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
 DYNAMO_KV_BLOCK_SIZE = int(os.environ.get("DYNAMO_KV_BLOCK_SIZE", "64"))
+# Worker-side port scheme (must match worker/manager.py): a node's `port` is the allocated
+# base slot; vLLM's API listens at +40000, a dynamo worker's system (health/metrics) port
+# at +10000 (Dynamo parses DYN_SYSTEM_PORT as i16, so +40000 is out of range).
+VLLM_API_PORT_OFFSET = 40000
+DYNAMO_SYSTEM_PORT_OFFSET = 10000
+
+
+def node_api_port(dep: dict, node: dict) -> int:
+    off = DYNAMO_SYSTEM_PORT_OFFSET if dep.get("engine", "vllm") == "dynamo" else VLLM_API_PORT_OFFSET
+    return node["port"] + off
 
 # CI/CD self-update config.
 HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "")          # host path of the git checkout
@@ -694,7 +704,7 @@ class CentralManager:
                 continue
             served_name = dep.get("served_model_name") or dep.get("model", "")
             for node in dep.get("nodes", []):
-                key = (node["host"], node["port"] + 40000, served_name)
+                key = (node["host"], node_api_port(dep, node), served_name)
                 probe_targets.setdefault(key, dep)
 
         results: dict = {}  # key -> "other_model" | True | False
@@ -734,7 +744,7 @@ class CentralManager:
                 all_healthy = True
                 stale_idx: list = []
                 for node_idx, node in enumerate(dep.get("nodes", [])):
-                    key = (node["host"], node["port"] + 40000, served_name)
+                    key = (node["host"], node_api_port(dep, node), served_name)
                     res = results.get(key)
                     if res == "other_model" and dep.get("engine", "vllm") == "dynamo":
                         res = None  # never computed for dynamo nodes

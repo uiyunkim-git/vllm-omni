@@ -49,6 +49,12 @@ HOST_PORT_OFFSET = 40000
 # for discovery. Central normally passes both explicitly in the deploy request.
 DYNAMO_IMAGE = os.environ.get("DYNAMO_IMAGE", "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2")
 DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
+# Dynamo parses DYN_SYSTEM_PORT as i16 (max 32767), so the health/metrics port cannot use
+# the +40000 slot the vLLM API uses. Keep every dynamo port derived from the allocated
+# base `port` (21001..): system=+10000 (31xxx), response-stream=+42000, kv-events=+44000.
+DYNAMO_SYSTEM_PORT_OFFSET = 10000
+DYNAMO_RESP_PORT_OFFSET = 42000
+DYNAMO_KV_PORT_OFFSET = 44000
 # Internal ports start at 21001 so host ports (internal + 40000) land at 61001+,
 # above the OS ephemeral port range (32768-60999) to avoid bind conflicts.
 _PORT_START = 21001
@@ -338,12 +344,11 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
                 # ── dynamo engine only ──────────────────────────────────────
                 # Host networking; three ports per instance, all derived from the
                 # one allocated `port` so the existing allocator/conflict logic
-                # keeps working:  system(health/metrics)=+40000 (same slot the
-                # vLLM API used), response-stream=+42000, kv-events=+44000.
+                # keeps working (see DYNAMO_*_PORT_OFFSET).
                 image=requested_image,
-                system_port=port + HOST_PORT_OFFSET,
-                resp_port=port + HOST_PORT_OFFSET + 2000,
-                kv_port=port + HOST_PORT_OFFSET + 4000,
+                system_port=port + DYNAMO_SYSTEM_PORT_OFFSET,
+                resp_port=port + DYNAMO_RESP_PORT_OFFSET,
+                kv_port=port + DYNAMO_KV_PORT_OFFSET,
                 advertise_host=req.get("advertise_host") or self._default_advertise_host(),
                 etcd_endpoints=req.get("etcd_endpoints") or DYNAMO_ETCD_ENDPOINTS,
                 namespace=req.get("namespace") or "dynamo",
