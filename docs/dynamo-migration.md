@@ -64,6 +64,9 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
       검증: 8192×8192 believe 버스트 → 102.6 req/s · 21,951 tok/s · 무오류.
 - [x] Phase 3 — central 수집기가 Dynamo 프론트(`dynamo_frontend_requests_total`) + 워커 system 포트(`dynamo_component_*`)를
       기존 맵/링버퍼에 합침; 라우터 스크레이프는 선택적. (UI 라벨은 `neuron-worker:31xxx`.)
-- [ ] Phase 4 — 타 호스트 이미지 풀 [x hubble, heart3, cubis] → hubble `gpt-oss-120b-low`, cubis 임베딩 0.6B/8B 이전;
-      프론트를 tailscale netns로(kbds 대비).
-- [ ] Phase 5 — 컷오버: 프론트 :11434, `vllm_router_p2c` 제거, believe에 알림.
+- [x] Phase 5 — **컷오버 완료 (2026-09-11 20:0x KST)**: 전 호스트 배포 정지·`deployments.json` 초기화 후 프론트가 `:11434`,
+      `vllm_router_p2c` 컨테이너 제거(코드는 남김). gpt-oss-120b ×5(neuron, 배포 `ce5877fe`) Dynamo로 재배포. believe merge 배포 확인 후 진행.
+      (라우터→Dynamo 하이브리드는 불가: 라우터가 SGLang 전용 필드를 넣어 Dynamo가 400.)
+- [ ] Phase 4 — 타 호스트: 이미지 풀 [x hubble, heart3, cubis]. **방화벽**(heart3·hubble: 31000-33999, 63000-65999/tcp from
+      143.248.74.105) 과 **cubis 워커 에이전트 재빌드**(5ab7e3d 고착) 뒤 → 임베딩 0.6B/8B(believe qwen_retriever 의존), `-low`(설정 확인 필요).
+- [ ] Phase 6 — omniserve 웹(central UI) Dynamo 중심 전면 개편 → `docs/omniserve-ui-redesign.md`(별도 세션).
