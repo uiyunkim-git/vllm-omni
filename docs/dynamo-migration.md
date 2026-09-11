@@ -56,7 +56,10 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
 ## 단계
 - [x] Phase 1 — 인프라: etcd + 프론트엔드(:11435) compose, 워커 `engine=dynamo` 경로, central 전달/health/등록 스킵.
 - [x] Phase 1 검증: neuron GPU4에 gpt-oss(dynamo) central 배포 → 프론트 `/v1/models` 노출 → central health → believe 벤치 (23.4 req/s, 파일럿과 동일).
-- [ ] Phase 2 — neuron의 gpt-oss 전부 dynamo로(GPU0,1,2,3,4), 라우터 경유 vLLM 인스턴스 제거.
-- [ ] Phase 3 — central 메트릭/UI를 `dynamo_frontend_*` 기준으로; 워커 목록은 etcd/프론트 기준.
-- [ ] Phase 4 — 타 호스트(hubble/heart3/cubis/kbds) 이미지 풀 + 임베딩·기타 모델 이전; 프론트를 tailscale netns로.
+- [x] Phase 2 — neuron의 gpt-oss 전부 dynamo로(GPU0,1,2,3,4; 배포 f7b3788a/ba486e8f/57781b37), vLLM 인스턴스 제거.
+      검증: 8192×8192 believe 버스트 → 102.6 req/s · 21,951 tok/s · 무오류.
+- [x] Phase 3 — central 수집기가 Dynamo 프론트(`dynamo_frontend_requests_total`) + 워커 system 포트(`dynamo_component_*`)를
+      기존 맵/링버퍼에 합침; 라우터 스크레이프는 선택적. (UI 라벨은 `neuron-worker:31xxx`.)
+- [ ] Phase 4 — 타 호스트 이미지 풀 [x hubble, heart3, cubis] → hubble `gpt-oss-120b-low`, cubis 임베딩 0.6B/8B 이전;
+      프론트를 tailscale netns로(kbds 대비).
 - [ ] Phase 5 — 컷오버: 프론트 :11434, `vllm_router_p2c` 제거, believe에 알림.
