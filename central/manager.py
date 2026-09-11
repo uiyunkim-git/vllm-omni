@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import uuid
@@ -258,14 +259,25 @@ class CentralManager:
             return "deepseek_v4", "deepseek_v4"
         return None, None
 
+    @staticmethod
+    def _dynamo_namespace(served_model_name: str) -> str:
+        """Dynamo allows ONE model per (namespace, component, endpoint): a second
+        model registering on `dynamo/backend/generate` fails with "a different
+        model is already registered there". So every served model gets its own
+        namespace, `<prefix>-<slug>`; the frontend runs unscoped and discovers
+        them all. Replicas of the same model share the namespace (= one pool)."""
+        slug = re.sub(r"[^a-z0-9]+", "-", (served_model_name or "model").lower()).strip("-")
+        return f"{DYNAMO_NAMESPACE}-{slug}"[:63]
+
     def _dynamo_fields(self, req: dict, worker: dict) -> dict:
         if req.get("engine") != "dynamo":
             return {}
         rp, tp = self._infer_parsers(req.get("model", ""))
+        served = req.get("served_model_name") or req.get("model", "")
         return {
             "advertise_host": worker["host"],
             "etcd_endpoints": DYNAMO_ETCD_ENDPOINTS,
-            "namespace": DYNAMO_NAMESPACE,
+            "namespace": self._dynamo_namespace(served),
             "reasoning_parser": req.get("reasoning_parser") or rp,
             "tool_call_parser": req.get("tool_call_parser") or tp,
             "block_size": req.get("block_size") or DYNAMO_KV_BLOCK_SIZE,

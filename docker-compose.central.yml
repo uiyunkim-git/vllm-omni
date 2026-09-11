@@ -135,7 +135,10 @@ services:
       - HOME=/root
       - DYN_DISCOVERY_BACKEND=etcd
       - ETCD_ENDPOINTS=http://etcd:2379
-      - DYN_NAMESPACE=${DYNAMO_NAMESPACE:-dynamo}
+      # No DYN_NAMESPACE here on purpose: the frontend stays UNscoped so it discovers
+      # every model. Each served model lives in its own namespace
+      # (`dynamo-<slug>`, see CentralManager._dynamo_namespace) because Dynamo allows
+      # one model per (namespace, component, endpoint).
       - DYN_LOG=${DYNAMO_LOG:-info}
       - TAILSCALE_GATEWAY_HOST=tailscale
       - TAILSCALE_SUBNET=100.64.0.0/10
@@ -155,6 +158,7 @@ services:
     command: >
       python3 -m dynamo.frontend
       --http-port 8080
+      --namespace-prefix ${DYNAMO_NAMESPACE:-dynamo}
       --router-mode ${DYNAMO_ROUTER_MODE:-kv}
       --kv-cache-block-size ${DYNAMO_KV_BLOCK_SIZE:-64}
       --migration-limit ${DYNAMO_MIGRATION_LIMIT:-3}
