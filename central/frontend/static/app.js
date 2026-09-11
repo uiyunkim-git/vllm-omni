@@ -457,13 +457,18 @@ function renderDeployments() {
                 const dtype = (dep.deployment_type || '').toUpperCase();
                 const engine = (dep.engine || 'vllm').toUpperCase();
                 const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
-                const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark' : 'bg-dark';
+                const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark'
+                    : engine === 'DYNAMO' ? 'bg-success' : 'bg-dark';
+                // Worker container names are `<engine>_<deployId>_<worker>_<gpu>` (see
+                // worker/manager.py); the prefix must follow the engine or dynamo/ollama
+                // nodes never match and show as "Starting" with no logs.
+                const enginePrefix = engine === 'DYNAMO' ? 'dynamo' : engine === 'OLLAMA' ? 'ollama' : 'vllm';
 
                 if (multi) {
                     const lastDash = gpu.lastIndexOf('-');
                     const gpuWid = gpu.substring(0, lastDash);
                     const gpuGid = gpu.substring(lastDash + 1);
-                    const containerName = `vllm_${dep.id}_${gpuWid}_${gpuGid}`;
+                    const containerName = `${enginePrefix}_${dep.id}_${gpuWid}_${gpuGid}`;
                     const node = (dep.nodes || []).find(n => n.name === containerName);
                     const isRunning = node ? !!node.is_healthy : false;
                     const statusDot = isRunning
