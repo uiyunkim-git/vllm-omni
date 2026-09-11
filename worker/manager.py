@@ -52,9 +52,10 @@ DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.
 # Dynamo parses DYN_SYSTEM_PORT as i16 (max 32767), so the health/metrics port cannot use
 # the +40000 slot the vLLM API uses. Keep every dynamo port derived from the allocated
 # base `port` (21001..): system=+10000 (31xxx), response-stream=+42000, kv-events=+44000.
-DYNAMO_SYSTEM_PORT_OFFSET = 10000
-DYNAMO_RESP_PORT_OFFSET = 42000
-DYNAMO_KV_PORT_OFFSET = 44000
+DYNAMO_SYSTEM_PORT_OFFSET = 10000   # 31xxx  health/metrics (DYN_SYSTEM_PORT, i16)
+DYNAMO_RPC_PORT_OFFSET = 12000      # 33xxx  TCP request-plane listener (DYN_TCP_RPC_PORT; else OS-assigned!)
+DYNAMO_RESP_PORT_OFFSET = 42000     # 63xxx  TCP response-stream server (DYN_TCP_RESPONSE_STREAM_PORT)
+DYNAMO_KV_PORT_OFFSET = 44000       # 65xxx  ZMQ KV events
 # Internal ports start at 21001 so host ports (internal + 40000) land at 61001+,
 # above the OS ephemeral port range (32768-60999) to avoid bind conflicts.
 _PORT_START = 21001
@@ -347,6 +348,7 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
                 # keeps working (see DYNAMO_*_PORT_OFFSET).
                 image=requested_image,
                 system_port=port + DYNAMO_SYSTEM_PORT_OFFSET,
+                rpc_port=port + DYNAMO_RPC_PORT_OFFSET,
                 resp_port=port + DYNAMO_RESP_PORT_OFFSET,
                 kv_port=port + DYNAMO_KV_PORT_OFFSET,
                 advertise_host=req.get("advertise_host") or self._default_advertise_host(),

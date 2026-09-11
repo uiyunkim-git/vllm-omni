@@ -4,7 +4,8 @@ version: '3.9'
 # Registers itself in etcd; the Dynamo frontend discovers it and talks to it over the
 # TCP request plane. Host networking so the advertised ports are the real ones:
 #   system_port  = health/metrics (/health, /live, /metrics incl. vllm:* engine metrics)
-#   resp_port    = TCP response-stream server (frontend -> worker request plane)
+#   rpc_port     = TCP request-plane listener (frontend -> worker requests)
+#   resp_port    = TCP response-stream server (worker -> frontend response streams)
 #   kv_port      = ZMQ KV-event publisher (frontend KV-aware router subscribes)
 services:
   {{ node_name }}:
@@ -31,6 +32,8 @@ services:
       - DYN_SYSTEM_PORT={{ system_port }}
       - DYN_TCP_RESPONSE_STREAM_HOST={{ advertise_host }}
       - DYN_TCP_RESPONSE_STREAM_PORT={{ resp_port }}
+      # request-plane listener; without this Dynamo binds an OS-assigned port (unfirewallable)
+      - DYN_TCP_RPC_PORT={{ rpc_port }}
       - DYN_EVENT_PLANE_HOST={{ advertise_host }}
       - DYN_LOG={{ dyn_log | default('info') }}
 {% if huggingface_token %}

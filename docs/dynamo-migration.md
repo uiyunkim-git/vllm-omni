@@ -28,10 +28,14 @@ central (FastAPI) ── /api/deploy(engine=dynamo) ──▶ worker agent ─�
 | 용도 | 포트 | 비고 |
 |---|---|---|
 | system (health/metrics) | `port + 10000` (31xxx) | `/health` → `{"status":"ready"}`, `/metrics`에 `vllm:*` 포함. Dynamo가 `DYN_SYSTEM_PORT`를 i16으로 파싱해 32767 이하만 가능 |
-| TCP 응답 스트림(요청 플레인) | `port + 42000` (63xxx) | `DYN_TCP_RESPONSE_STREAM_HOST/PORT`로 고정·광고 |
+| TCP 요청 플레인 리스너 | `port + 12000` (33xxx) | `DYN_TCP_RPC_PORT`. 미지정 시 OS가 임의 포트를 잡아 방화벽 정책이 불가능 |
+| TCP 응답 스트림 | `port + 42000` (63xxx) | `DYN_TCP_RESPONSE_STREAM_HOST/PORT`로 고정·광고 |
 | ZMQ KV 이벤트 | `port + 44000` (65xxx) | `--kv-events-config`; `DYN_EVENT_PLANE_HOST`로 광고 |
 
-광고 주소(`advertise_host`)는 central이 그 워커에 도달하는 IP(`worker.host`)를 그대로 전달. 방화벽은 31xxx·63xxx·65xxx 인바운드 허용 필요.
+광고 주소(`advertise_host`)는 central이 그 워커에 도달하는 IP(`worker.host`)를 그대로 전달.
+**방화벽(각 워커 호스트, neuron→워커 인바운드): 31000-33999, 63000-65999/tcp 허용 필요.** 프론트엔드는 등록 시
+워커 system 포트에서 모델 정보를 HTTP로 가져오고(`fetching http://host:31xxx/...`), 요청은 33xxx로 보낸다 — heart3에서
+31xxx가 필터링되어 임베딩 워커가 etcd에는 등록됐지만 프론트 등록이 계속 실패했다(2026-09-11).
 
 ### 배포 요청 (central `/api/deploy`)
 ```json
