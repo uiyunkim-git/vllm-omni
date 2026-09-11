@@ -265,47 +265,137 @@ ROUTER_WORKERS_URL = os.environ.get("ROUTER_WORKERS_URL", "http://143.248.74.105
 # aggregates for that cycle.
 _last_live_instances: Dict[str, str] = {}
 
-async def _collect_metrics():
-    """One scrape cycle. Fetch /metrics + /workers, push samples to ring
-    buffers, and update `_latest_scrape` for the API layer to read."""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(ROUTER_METRICS_URL, timeout=3.0)
-            text = resp.text
-    except Exception as e:
-        logger.warning(f"metrics scrape failed ({ROUTER_METRICS_URL}): {e!r}")
-        return
+# ── Dynamo data plane metrics ────────────────────────────────────────────────
+# engine=dynamo nodes are not behind the P2C router. Their per-worker counters
+# come from each worker's system port (`dynamo_component_*` for the `generate`
+# endpoint), and the global request stream from the Dynamo frontend
+# (`dynamo_frontend_requests_total`). Both are folded into the SAME per-worker
+# maps / ring buffers the router path fills, keyed by the node's system URL
+# (`http://host:31xxx`), so the dashboard needs no separate code path.
+DYNAMO_FRONTEND_URL = os.environ.get("DYNAMO_FRONTEND_URL", "http://143.248.74.105:11435")
+_DYNAMO_SYSTEM_PORT_OFFSET = 10000
 
-    raw = _parse_prometheus_full(text)
+
+def _dynamo_node_url(host: str, base_port: int) -> str:
+    return f"http://{host}:{base_port + _DYNAMO_SYSTEM_PORT_OFFSET}"
+
+
+def _node_url(dep: dict, node: dict) -> str:
+    """Endpoint URL central uses as the per-worker key for a deployment node:
+    the vLLM API (https, +40000) for engine=vllm, the Dynamo system port for
+    engine=dynamo."""
+    if dep.get("engine", "vllm") == "dynamo":
+        return _dynamo_node_url(node["host"], node["port"])
+    return f'https://{node["host"]}:{node["port"] + 40000}'
+
+
+def _dynamo_nodes() -> list:
+    """[(url, dep)] for every node of every engine=dynamo deployment."""
+    out = []
+    for dep in manager.load_deployments():
+        if dep.get("engine", "vllm") != "dynamo" or dep.get("status") not in ("running", "starting"):
+            continue
+        for node in dep.get("nodes", []):
+            out.append((_dynamo_node_url(node["host"], node["port"]), dep, node))
+    return out
+
+
+async def _scrape_dynamo(client: httpx.AsyncClient) -> dict:
+    """Scrape the Dynamo frontend + every dynamo worker's system port.
+    Returns per-worker maps in the router path's shape (empty when nothing
+    is deployed on the Dynamo data plane)."""
+    res = {
+        "total_requests": 0, "processed": {}, "running": {}, "lat_sum": {}, "lat_cnt": {},
+        "bucket": {}, "succ": {}, "fail": {}, "live": {}, "active_workers": 0,
+    }
+    nodes = _dynamo_nodes()
+    if not nodes:
+        return res
+
+    try:
+        r = await client.get(f"{DYNAMO_FRONTEND_URL}/metrics", timeout=3.0)
+        fraw = _parse_prometheus_full(r.text)
+        res["total_requests"] = sum(int(float(e["value"])) for e in fraw.get("dynamo_frontend_requests_total", []))
+    except Exception as e:
+        logger.debug(f"dynamo frontend scrape failed: {e!r}")
+
+    async def one(url, dep, node):
+        try:
+            r = await client.get(f"{url}/metrics", timeout=3.0)
+        except Exception:
+            return
+        raw = _parse_prometheus_full(r.text)
+
+        def gen(metric):
+            return [e for e in raw.get(metric, []) if e["labels"].get("dynamo_endpoint") == "generate"]
+
+        res["live"][url] = node.get("name", "dynamo")
+        res["active_workers"] += 1
+        res["processed"][url] = sum(int(float(e["value"])) for e in gen("dynamo_component_requests_total"))
+        res["running"][url] = int(sum(float(e["value"]) for e in gen("dynamo_component_inflight_requests")))
+        res["lat_sum"][url] = sum(float(e["value"]) for e in gen("dynamo_component_request_duration_seconds_sum"))
+        res["lat_cnt"][url] = sum(int(float(e["value"])) for e in gen("dynamo_component_request_duration_seconds_count"))
+        for e in gen("dynamo_component_request_duration_seconds_bucket"):
+            le = e["labels"].get("le")
+            if le is None or le == "+Inf":
+                continue
+            res["bucket"].setdefault(le, {})[url] = res["bucket"].get(le, {}).get(url, 0) + int(float(e["value"]))
+        res["fail"][url] = sum(int(float(e["value"])) for e in gen("dynamo_component_errors_total"))
+        res["succ"][url] = max(0, res["processed"][url] - res["fail"][url])
+
+    await asyncio.gather(*(one(u, d, n) for u, d, n in nodes))
+    return res
+
+
+async def _collect_metrics():
+    """One scrape cycle. Fetch the router's /metrics + /workers AND the Dynamo
+    data plane (frontend + worker system ports), push samples to ring buffers,
+    and update `_latest_scrape` for the API layer to read. Either source may be
+    absent (router removed after the Dynamo cutover, or no dynamo nodes yet)."""
+    raw: dict = {}
+    router_ok = False
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(ROUTER_METRICS_URL, timeout=3.0)
+            raw = _parse_prometheus_full(resp.text)
+            # Partial-scrape guard: if any core series is missing we'd interpret
+            # it as a counter reset and blow away the ring buffers — treat the
+            # router as absent for this cycle instead.
+            _required = (
+                "vllm_router_requests_total",
+                "vllm_router_processed_requests_total",
+                "vllm_router_generate_duration_seconds_sum",
+                "vllm_router_generate_duration_seconds_count",
+            )
+            router_ok = all(raw.get(k) for k in _required)
+        except Exception as e:
+            logger.debug(f"router metrics scrape failed ({ROUTER_METRICS_URL}): {e!r}")
+        dyn = await _scrape_dynamo(client)
+
+    if not router_ok and not dyn["live"]:
+        return
+    if not router_ok:
+        raw = {}
     now = time.time()
 
-    # Partial-scrape guard: if any core series is missing we'd interpret it as
-    # a counter reset and blow away the ring buffers. Skip the whole cycle.
-    _required = (
-        "vllm_router_requests_total",
-        "vllm_router_processed_requests_total",
-        "vllm_router_generate_duration_seconds_sum",
-        "vllm_router_generate_duration_seconds_count",
-    )
-    if not all(raw.get(k) for k in _required):
-        return
-
     active_workers = int(next((e["value"] for e in raw.get("vllm_router_active_workers", []) if not e["labels"]), 0))
+    active_workers += dyn["active_workers"]
 
     live_instances: Dict[str, str] = {}
-    try:
-        async with httpx.AsyncClient() as client:
-            wresp = await client.get(ROUTER_WORKERS_URL, timeout=2.0)
-            for w in wresp.json().get("workers", []):
-                if w.get("url") and w.get("instance_id"):
-                    live_instances[w["url"]] = w["instance_id"]
-        _last_live_instances.clear()
-        _last_live_instances.update(live_instances)
-    except Exception as e:
-        # Reuse the previous snapshot rather than failing open (see comment on
-        # _last_live_instances above).
-        logger.warning(f"/workers fetch failed, using last-known live set: {e!r}")
-        live_instances = dict(_last_live_instances)
+    if router_ok:
+        try:
+            async with httpx.AsyncClient() as client:
+                wresp = await client.get(ROUTER_WORKERS_URL, timeout=2.0)
+                for w in wresp.json().get("workers", []):
+                    if w.get("url") and w.get("instance_id"):
+                        live_instances[w["url"]] = w["instance_id"]
+            _last_live_instances.clear()
+            _last_live_instances.update(live_instances)
+        except Exception as e:
+            # Reuse the previous snapshot rather than failing open (see comment on
+            # _last_live_instances above).
+            logger.warning(f"/workers fetch failed, using last-known live set: {e!r}")
+            live_instances = dict(_last_live_instances)
 
     def _is_live(labels: dict) -> bool:
         if not live_instances:
@@ -378,6 +468,18 @@ async def _collect_metrics():
         e for e in raw.get("vllm_router_cb_state_transitions_total", [])
         if _is_live(e["labels"])
     ]
+
+    # ── Fold the Dynamo data plane into the same maps ─────────────────────
+    total_requests += dyn["total_requests"]
+    processed_map.update(dyn["processed"])
+    running_map.update(dyn["running"])
+    lat_sum_per_worker.update(dyn["lat_sum"])
+    lat_cnt_per_worker.update(dyn["lat_cnt"])
+    for le, by_worker in dyn["bucket"].items():
+        bucket_per_worker.setdefault(le, {}).update(by_worker)
+    for u in dyn["live"]:
+        live_instances[u] = dyn["live"][u]
+        cb_outcomes[u] = {"success": dyn["succ"].get(u, 0), "failure": dyn["fail"].get(u, 0)}
 
     # Push ring-buffer samples (same logic as before, just runs unconditionally).
     _push_sample("global:requests", now, total_requests)
@@ -482,7 +584,7 @@ async def get_prometheus_stats(window: int = 900, served_model_name: Optional[st
     url_to_dep: Dict[str, dict] = {}        # url → {id, name, served_model_name}
     url_to_worker_id: Dict[str, str] = {}   # url → worker_id
     deployments: Dict[str, dict] = {}
-    _worker_id_re = re.compile(r'^vllm_[^_]+_(.+)_\d+$')
+    _worker_id_re = re.compile(r'^(?:vllm|dynamo)_[^_]+_(.+)_\d+$')
     for dep in manager.load_deployments():
         dep_key = dep["id"]
         served = dep.get("served_model_name") or dep.get("model", "")
@@ -491,11 +593,11 @@ async def get_prometheus_stats(window: int = 900, served_model_name: Optional[st
             "name": dep["name"],
             "model": dep.get("model", ""),
             "served_model_name": served,
+            "engine": dep.get("engine", "vllm"),
             "worker_urls": [],
         }
         for node in dep.get("nodes", []):
-            ext_port = node["port"] + 40000
-            url = f'https://{node["host"]}:{ext_port}'
+            url = _node_url(dep, node)
             url_to_dep[url] = {"id": dep_key, "name": dep["name"], "served_model_name": served}
             m = _worker_id_re.match(node.get("name", "") or "")
             if m:
@@ -748,7 +850,7 @@ async def get_rps_history(window: int = 3600, served_model_name: Optional[str] =
                       (deployment and dep.get("name") == deployment)
             if matches:
                 for node in dep.get("nodes", []):
-                    worker_urls.append(f'https://{node["host"]}:{node["port"] + 40000}')
+                    worker_urls.append(_node_url(dep, node))
         if not worker_urls:
             return {"window_seconds": window, "samples": [], "allowed": _ALLOWED_HISTORY}
         for u in worker_urls:
