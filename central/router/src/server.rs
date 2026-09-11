@@ -842,7 +842,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     println!("DEBUG: Creating HTTP client");
     let client = Client::builder()
         .pool_idle_timeout(Some(Duration::from_secs(50)))
-        .pool_max_idle_per_host(500)
+        // Do NOT cap idle connections per worker (reqwest's default). A cap
+        // below the per-worker in-flight count (500 < ~680 at 2048 total
+        // concurrency over 3 workers) closes the surplus connection on every
+        // response and forces a fresh TCP+TLS handshake (RSA-4096, served by
+        // the worker's single-process uvicorn) on the next request. Idle
+        // connections are cheap and expire via pool_idle_timeout anyway.
+        // Note: measured router throughput at 2048 concurrency is ~125 req/s,
+        // i.e. at engine capacity — an earlier "router = 31% of capacity"
+        // reading was an artifact of the httpx benchmark client, not this pool.
+        .pool_max_idle_per_host(usize::MAX)
         .timeout(Duration::from_secs(config.request_timeout_secs))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true)
