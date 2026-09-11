@@ -32,6 +32,19 @@ non-stream, **동시성 1024 × 1000요청**. 프롬프트 ≈ 830tok.
 § SGLang도 같은 562 prompt tok → 마찬가지로 system/developer 중 하나를 버린다. 3메시지 Harmony 요청을
   올바르게(835tok) 렌더링하는 것은 셋 중 vLLM만이다.
 
+### 부하를 더 올리면 (believe medium, 병렬 측정 — vLLM GPU4 / Dynamo GPU0 동시)
+
+| 동시성 × 요청 | 엔진 | req/s | tok/s | p50 | p99 | 오류 |
+|---|---|---|---|---|---|---|
+| 4096 × 4096 | vLLM | 25.0 | 5,476 | 109s | 163s | 0 |
+| 4096 × 4096 | Dynamo | 25.4 | 5,520 | 99s | 160s | 0 |
+| **8192 × 8192** | vLLM | 25.8 | 5,588 | 160s | 264s | **1,335 실패 (16%)**: ConnectionReset 1,254 · Aborted 80 · 500 1 |
+| **8192 × 8192** | Dynamo | 26.1 | 5,646 | 178s | 311s | **0** |
+
+처리량은 어느 부하에서도 같다(GPU 100%, 엔진 running ~760~865 + 대기 수천). 차이는 **유입층의 견고성**:
+8k 동시 연결에서 vLLM의 단일 프로세스 uvicorn(+TLS)은 연결을 끊기 시작하고(believe 클라이언트는 재시도로
+흡수하지만 재시도 트래픽이 얹힘), Dynamo Rust 프론트엔드는 전부 수용했다.
+
 ### 해석
 - **Dynamo ≈ vLLM (+4~5% req/s, p50 −10%)**. gpt-oss-120b는 GPU 1장에서 이미 연산 포화라 서빙층(uvicorn vs Rust
   프론트엔드)이 처리량을 바꾸지 못한다. 엔진(vLLM 0.26.0, MXFP4=MARLIN, attn=TRITON_ATTN)이 같으니 당연한 결과.
