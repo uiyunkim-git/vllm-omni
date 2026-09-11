@@ -42,10 +42,14 @@ python3 -m dynamo.frontend \
   --kv-cache-block-size "$BLOCK_SIZE" \
   > /logs/frontend.log 2>&1 &
 
+# ONE_GPU_PER_WORKER=1: container sees N GPUs, worker i is pinned to GPU i (multi-GPU
+# replica test). Default (unset): all workers share the single visible GPU (co-location).
+NGPU=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
 for i in $(seq 0 $((NUM_WORKERS - 1))); do
   SYS_PORT=$((18081 + i))
   KV_PORT=$((20080 + i))
-  echo "[launch] worker $i  system:$SYS_PORT kv-events:$KV_PORT"
+  if [ "${ONE_GPU_PER_WORKER:-0}" = "1" ]; then export CUDA_VISIBLE_DEVICES=$((i % NGPU)); fi
+  echo "[launch] worker $i  system:$SYS_PORT kv-events:$KV_PORT gpu=${CUDA_VISIBLE_DEVICES:-shared}"
   DYN_SYSTEM_PORT=$SYS_PORT \
   python3 -m dynamo.vllm \
     --model "$MODEL" \
