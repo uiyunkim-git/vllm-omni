@@ -84,6 +84,46 @@
             box-shadow: 0 0 0 2px #bfdbfe;
         }
 
+        /* Frontend status strip (dashboard) — wraps instead of scrolling */
+        .stat-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .75rem 2rem;
+            padding: .85rem 1rem;
+        }
+        .stat-item { min-width: 96px; }
+        .stat-item .val { font-size: 1.25rem; font-weight: 700; line-height: 1.15; word-break: break-all; }
+        .stat-item .lbl {
+            font-size: .7rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: .06em; color: #6b7280;
+        }
+        .stat-item-url { flex: 1 1 240px; min-width: 0; }
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px;
+            border-radius: 50%; margin-right: 6px; vertical-align: middle;
+        }
+        .st-dot-wrap { display: inline-flex; align-items: center; }
+        .fe-model-list { border-top: 1px solid #e5e7eb; }
+        .fe-model-row {
+            display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+            padding: .4rem 1rem; border-bottom: 1px solid #f1f3f5;
+        }
+        .fe-model-row:last-child { border-bottom: none; }
+        .fe-model-row > .font-monospace { flex: 1 1 220px; min-width: 0; }
+
+        /* Deployment lists, grouped by host (dashboard) */
+        .dep-host-head {
+            display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+            padding: .55rem .85rem; cursor: pointer; user-select: none;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .dep-host-head:hover { background: #f9fafb; }
+        .inst-table td, .inst-table th { padding: .45rem .75rem; vertical-align: middle; }
+        .inst-table tbody tr:last-child td { border-bottom: none; }
+        .dep-head-row td { background: #f8fafc; border-top: 1px solid #e2e8f0; }
+        .dep-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+        .dep-head-meta { font-size: .75rem; color: #94a3b8; margin-top: .2rem; word-break: break-word; }
+
         /* GPU list rows (dashboard) */
         .gpu-list-group { margin-bottom: 1rem; }
         .gpu-list-head {
@@ -218,10 +258,10 @@
                         <a class="nav-link {% if active_tab == 'configs' %}active{% endif %}" href="/configs">Configs</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if active_tab == 'endpoints' %}active{% endif %}" href="/endpoints">Endpoints</a>
+                        <a class="nav-link {% if active_tab == 'endpoints' %}active{% endif %}" href="/endpoints">Hosts</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if active_tab == 'gateway' %}active{% endif %}" href="/gateway"><i class="fa-solid fa-server me-1"></i>Gateway</a>
+                        <a class="nav-link {% if active_tab == 'gateway' %}active{% endif %}" href="/gateway"><i class="fa-solid fa-code me-1"></i>API</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if active_tab == 'metrics' %}active{% endif %}" href="/metrics"><i class="fa-solid fa-chart-line me-1"></i>Metrics</a>
