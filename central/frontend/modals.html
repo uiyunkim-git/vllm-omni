@@ -44,17 +44,26 @@
                                 <div>
                                     <label class="form-label small fw-semibold mb-1">엔진</label>
                                     <select class="form-select form-select-sm" id="deployEngine" onchange="handleEngineChange()">
-                                        <option value="vllm" selected>vLLM</option>
-                                        <option value="ollama">Ollama</option>
+                                        <option value="dynamo" selected>dynamo (frontend에서 서빙)</option>
+                                        <option value="vllm">vllm (legacy, direct endpoint — no gateway)</option>
                                     </select>
+                                    <div class="form-text deploy-legacy-warning text-warning" style="display:none;font-size:.82rem">
+                                        <i class="fa-solid fa-triangle-exclamation me-1"></i>legacy 엔진은 frontend(:11434)에 노출되지 않습니다.
+                                    </div>
                                 </div>
-                                <div id="vllm-image-section">
-                                    <label class="form-label small fw-semibold mb-1">Docker Image</label>
-                                    <input type="text" class="form-control form-control-sm font-monospace" id="deployVllmImage"
-                                        placeholder="vllm/vllm-openai:latest"
-                                        list="vllm-image-datalist">
-                                    <datalist id="vllm-image-datalist"></datalist>
-                                    <div class="form-text" style="font-size:.82rem">비워두면 <code>vllm/vllm-openai:latest</code> 사용. 각 워커에 미리 pull 되어 있어야 합니다.</div>
+                                <div class="mt-2">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="deployIsEmbedding">
+                                        <label class="form-check-label small fw-semibold" for="deployIsEmbedding">Embedding 모델</label>
+                                    </div>
+                                </div>
+                                <div class="mt-2">
+                                    <label class="form-label small fw-semibold mb-1">Docker Image <span class="text-muted fw-normal">(선택)</span></label>
+                                    <input type="text" class="form-control form-control-sm font-monospace" id="deployImage"
+                                        placeholder="nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2"
+                                        list="deploy-image-datalist">
+                                    <datalist id="deploy-image-datalist"></datalist>
+                                    <div class="form-text" style="font-size:.82rem">비워두면 엔진 기본 이미지 사용. 각 호스트에 미리 pull 되어 있어야 합니다.</div>
                                 </div>
                             </div>
 
@@ -130,6 +139,23 @@
                                         <input type="number" class="form-control form-control-sm" id="deployGpuUtil"
                                             value="0.9" step="0.05" min="0.1" max="1.0">
                                     </div>
+                                </div>
+                                <div class="row g-2 mb-2">
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold mb-1">Reasoning parser</label>
+                                        <input type="text" class="form-control form-control-sm font-monospace" id="deployReasoningParser"
+                                            placeholder="auto from model name">
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label small fw-semibold mb-1">Tool call parser</label>
+                                        <input type="text" class="form-control form-control-sm font-monospace" id="deployToolCallParser"
+                                            placeholder="auto from model name">
+                                    </div>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label small fw-semibold mb-1">KV block size</label>
+                                    <input type="text" class="form-control form-control-sm font-monospace kv-block-size" value="64" readonly disabled>
+                                    <div class="form-text" style="font-size:.82rem">고정값 — frontend와 동일해야 합니다.</div>
                                 </div>
                                 <div>
                                     <label class="form-label small fw-semibold mb-1">추가 엔진 인수 <span class="text-muted fw-normal">(선택)</span></label>

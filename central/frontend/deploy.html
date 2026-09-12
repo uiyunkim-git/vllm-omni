@@ -45,10 +45,20 @@
                         </div>
                         <div>
                             <label class="form-label fw-semibold">엔진</label>
-                            <select class="form-select" id="deployEngine">
-                                <option value="vllm" selected>vLLM</option>
-                                <option value="ollama">Ollama</option>
+                            <select class="form-select" id="deployEngine" onchange="handleEngineChange()">
+                                <option value="dynamo" selected>dynamo (frontend에서 서빙)</option>
+                                <option value="vllm">vllm (legacy, direct endpoint — no gateway)</option>
                             </select>
+                            <div class="form-text deploy-legacy-warning text-warning" style="display:none">
+                                <i class="fa-solid fa-triangle-exclamation me-1"></i>legacy 엔진은 워커에 직접 HTTPS 엔드포인트를 띄웁니다. Dynamo frontend(:11434)에는 노출되지 않습니다.
+                            </div>
+                        </div>
+                        <div class="mt-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="deployIsEmbedding">
+                                <label class="form-check-label fw-semibold" for="deployIsEmbedding">Embedding 모델</label>
+                            </div>
+                            <div class="form-text"><code>--embedding-worker --runner pooling</code> 로 실행됩니다.</div>
                         </div>
                     </div>
 
@@ -97,7 +107,7 @@
 
                     <!-- GPU 그리드 -->
                     <div class="flex-grow-1">
-                        <div class="section-title">GPU 선택</div>
+                        <div class="section-title">호스트 / GPU 선택</div>
                         <div id="deployGpusGrid"
                             class="d-flex flex-wrap gap-2 p-3 rounded-3"
                             style="background:#f8f9fa;border:1px solid #e5e7eb;min-height:120px;align-content:flex-start">
@@ -128,6 +138,23 @@
                                 <input type="number" class="form-control" id="deployGpuUtil" value="0.9" step="0.05" min="0.1" max="1.0">
                             </div>
                         </div>
+                        <div class="row g-3 mt-0">
+                            <div class="col-md-4">
+                                <label class="form-label fw-semibold">Reasoning parser <span class="text-muted fw-normal">(선택)</span></label>
+                                <input type="text" class="form-control font-monospace" id="deployReasoningParser"
+                                    placeholder="auto from model name">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label fw-semibold">Tool call parser <span class="text-muted fw-normal">(선택)</span></label>
+                                <input type="text" class="form-control font-monospace" id="deployToolCallParser"
+                                    placeholder="auto from model name">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label fw-semibold">KV block size</label>
+                                <input type="text" class="form-control font-monospace kv-block-size" value="64" readonly disabled>
+                                <div class="form-text">고정값 — frontend의 <code>--kv-cache-block-size</code> 와 동일해야 합니다.</div>
+                            </div>
+                        </div>
                         <div class="mt-3">
                             <label class="form-label fw-semibold">추가 엔진 인수 <span class="text-muted fw-normal">(선택)</span></label>
                             <input type="text" class="form-control" id="deployExtraArgs"
@@ -135,10 +162,11 @@
                             <div class="form-text">엔진에 직접 전달되는 커맨드라인 플래그</div>
                         </div>
                         <div class="mt-3">
-                            <label class="form-label fw-semibold">Docker 이미지 <span class="text-muted fw-normal">(선택)</span></label>
-                            <input type="text" class="form-control font-monospace" id="deployVllmImage"
-                                placeholder="vllm/vllm-openai:latest">
-                            <div class="form-text">비워두면 기본 이미지 사용. 지정한 이미지가 엔드포인트에 없으면 배포 오류가 발생합니다.</div>
+                            <label class="form-label fw-semibold">Docker 이미지 <span class="text-muted fw-normal">(선택 · 오버라이드)</span></label>
+                            <input type="text" class="form-control font-monospace" id="deployImage"
+                                placeholder="nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2" list="deploy-image-datalist">
+                            <datalist id="deploy-image-datalist"></datalist>
+                            <div class="form-text">비워두면 엔진 기본 이미지 사용. 지정한 이미지가 호스트에 없으면 배포 오류가 발생합니다.</div>
                         </div>
                     </div>
 

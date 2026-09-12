@@ -4,8 +4,8 @@
 
 <nav aria-label="breadcrumb" class="mb-4">
     <ol class="breadcrumb small">
-        <li class="breadcrumb-item"><a href="/endpoints">Endpoints</a></li>
-        <li class="breadcrumb-item active">{{ worker.name }} — Docker Images</li>
+        <li class="breadcrumb-item"><a href="/endpoints">Hosts</a></li>
+        <li class="breadcrumb-item active">{{ worker.name }} — Engine Images</li>
     </ol>
 </nav>
 
@@ -13,7 +13,7 @@
     <div class="d-flex align-items-center gap-3">
         <i class="fa-brands fa-docker" style="color:#2496ED;font-size:1.6rem"></i>
         <div>
-            <h4 class="fw-bold mb-0">Docker Images</h4>
+            <h4 class="fw-bold mb-0">Engine Images</h4>
             <div class="text-muted small mt-1">
                 <span class="fw-semibold me-1">{{ worker.name }}</span>
                 <span class="font-monospace">{{ worker.host }}:{{ worker.port }}</span>
