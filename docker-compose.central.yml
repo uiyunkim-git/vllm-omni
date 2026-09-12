@@ -160,7 +160,7 @@ services:
       python3 -m dynamo.frontend
       --http-port 8080
       --namespace-prefix ${DYNAMO_NAMESPACE:-dynamo}
-      --router-mode ${DYNAMO_ROUTER_MODE:-kv}
+      --router-mode ${DYNAMO_ROUTER_MODE:-least-loaded}
       --kv-cache-block-size ${DYNAMO_KV_BLOCK_SIZE:-64}
       --migration-limit ${DYNAMO_MIGRATION_LIMIT:-3}
     networks:

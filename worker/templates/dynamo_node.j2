@@ -55,12 +55,9 @@ services:
       - --embedding-worker
       - --runner
       - pooling
-      # Embedding workers take no part in KV routing; with the frontend in
-      # --router-mode kv they would fail with "KV routing should not call generate
-      # on PushRouter". A worker set may advertise its own router mode, which
-      # overrides the frontend's for requests to this model.
-      - --router-mode
-      - round-robin
+      # NOTE: pooling models cannot be served by a frontend in --router-mode kv
+      # ("KV routing should not call generate on PushRouter"); the frontend runs
+      # least-loaded (docker-compose.central.yml, DYNAMO_ROUTER_MODE).
 {% endif %}
 {% if tensor_parallel_size > 1 %}
       - --tensor-parallel-size
