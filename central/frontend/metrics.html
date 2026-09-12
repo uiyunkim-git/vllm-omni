@@ -11,7 +11,6 @@
 .section-h .badge { font-weight: 600; letter-spacing: 0; text-transform: none; font-size: .72rem; }
 .section-h.live       { background: #ecfdf5; border-left-color: #10b981; color: #065f46; }
 .section-h.window     { background: #eff6ff; border-left-color: #3b82f6; color: #1e3a8a; }
-.section-h.cumulative { background: #f5f3ff; border-left-color: #8b5cf6; color: #4c1d95; }
 .section-h .pill-row .pill { font-size: .78rem; }
 .section-h .pill-row .pill.active { background: #1e3a8a; border-color: #1e3a8a; }
 .section-h .sublabel { font-size: .78rem; font-weight: 500; text-transform: none; letter-spacing: 0; color: inherit; opacity: .8; }
@@ -21,132 +20,33 @@
 .metric-card .lbl { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; margin-top: .25rem; }
 .metric-card .hint { font-size: .68rem; color: #9ca3af; margin-top: .15rem; }
 
-.chart-wrap { position: relative; height: 280px; }
 .chart-wrap-tall { position: relative; height: 360px; }
-.chart-wrap-bars { position: relative; height: var(--bar-chart-h, 280px); min-height: 240px; }
 
-.inflight-table {
-    padding: .25rem 1rem .75rem;
-    font-size: .82rem;
+/* Instance tables: plain rows, wrap instead of scrolling sideways. */
+.inst-metrics-table { font-size: .82rem; margin: 0; }
+.inst-metrics-table th {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .04em;
+    color: #6b7280; font-weight: 600; white-space: nowrap;
 }
-.if-group {
-    break-inside: avoid;
-    page-break-inside: avoid;
-    margin-bottom: .35rem;
-    border-radius: 6px;
+.inst-metrics-table td, .inst-metrics-table th { padding: .4rem .75rem; vertical-align: middle; }
+.inst-metrics-table td.num, .inst-metrics-table th.num {
+    text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.if-group-head {
-    display: grid;
-    grid-template-columns: 14px minmax(0, 1fr) minmax(80px, 140px) auto;
-    gap: .55rem;
-    align-items: center;
-    padding: .5rem .55rem;
-    cursor: pointer;
-    border-bottom: 1px solid #e5e7eb;
-    user-select: none;
-}
-.if-group-rps, .if-rps {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    color: #4b5563;
-    font-size: .78rem;
-    font-weight: 500;
-}
-.if-rps-unit {
-    color: #9ca3af;
-    font-size: .65rem;
-    font-weight: 400;
-    margin-left: .1rem;
-}
-.if-group-bar {
-    height: 6px;
-    background: #f3f4f6;
-    border-radius: 3px;
-    overflow: hidden;
-}
-.if-group-bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #34d399, #10b981);
-    border-radius: 3px;
-    transition: width .25s ease;
-}
-.if-group-head:hover { background: #f9fafb; }
-.if-caret {
-    font-size: .65rem;
-    color: #9ca3af;
-    transition: transform .15s ease;
-    line-height: 1;
-}
-.if-group.open .if-caret { transform: rotate(90deg); }
-.if-group-title {
-    font-size: .68rem;
-    font-weight: 600;
-    color: #374151;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-}
-.if-group-meta {
-    font-size: .68rem;
-    color: #6b7280;
-    margin-left: .35rem;
-    font-weight: 500;
-    text-transform: none;
-    letter-spacing: 0;
-}
-.if-group-total {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    color: #111827;
-    font-size: .8rem;
-}
-.if-group-body { display: none; padding: .25rem 0 .35rem; }
-.if-group.open .if-group-body { display: block; }
-.if-row {
-    display: grid;
-    grid-template-columns: 8px 80px 1fr 80px;
-    gap: .55rem;
-    align-items: center;
-    padding: .2rem .55rem;
-}
-.if-row:hover { background: #f9fafb; }
-.if-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #10b981;
-}
-.if-dot.s-open    { background: #ef4444; }
-.if-dot.s-half    { background: #f59e0b; }
-.if-dot.s-unknown { background: #d1d5db; }
-.if-port {
-    color: #6b7280;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: .72rem;
-}
-.if-bar {
-    height: 5px;
-    background: #f3f4f6;
-    border-radius: 3px;
-    overflow: hidden;
-}
-.if-bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #60a5fa, #3b82f6);
-    border-radius: 3px;
-    transition: width .25s ease;
-}
-.if-num {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    color: #111827;
-    font-size: .78rem;
-}
+.inst-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.inst-host { color: #6b7280; font-size: .72rem; word-break: break-all; }
+.inst-metrics-table tbody tr:last-child td { border-bottom: none; }
 
-.cb-closed   { color: #059669; }
-.cb-open     { color: #dc2626; }
-.cb-half     { color: #d97706; }
-.cb-unknown  { color: #9ca3af; }
+.hist-list { padding: .25rem 1rem .75rem; font-size: .82rem; }
+.hist-row {
+    display: grid; grid-template-columns: minmax(70px, 90px) 1fr minmax(78px, auto);
+    gap: .55rem; align-items: center; padding: .2rem .1rem;
+}
+.hist-row:hover { background: #f9fafb; }
+.hist-label { color: #4b5563; font-size: .78rem; white-space: nowrap; }
+.hist-bar { height: 7px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
+.hist-bar-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, #818cf8, #6366f1); transition: width .25s ease; }
+.hist-num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; color: #111827; font-size: .78rem; }
+.hist-unit { color: #9ca3af; font-size: .65rem; font-weight: 400; margin-left: .1rem; }
 
 #refresh-badge { font-size: .72rem; }
 
@@ -179,12 +79,12 @@
 
 {% block content %}
 <div class="d-flex align-items-center mb-3 gap-3 flex-wrap">
-    <h5 class="mb-0 fw-bold"><i class="fa-solid fa-chart-line me-2 text-primary"></i>Router Metrics</h5>
+    <h5 class="mb-0 fw-bold"><i class="fa-solid fa-chart-line me-2 text-primary"></i>Frontend Metrics</h5>
     <span id="refresh-badge" class="badge bg-secondary">loading…</span>
     <span id="error-msg" class="text-danger small d-none"></span>
 </div>
 
-<!-- Deployment tabs -->
+<!-- Per-model tabs (served_model_name) -->
 <div class="pill-row mb-3" id="dep-tabs">
     <button class="pill active" data-dep="__all__">All</button>
 </div>
@@ -195,21 +95,28 @@
     <span class="badge bg-light text-muted border">real-time · refreshed every 5 s</span>
 </div>
 <div class="row g-3 mb-3">
-    <div class="col-12 col-md-4">
+    <div class="col-6 col-md-3">
         <div class="card metric-card h-100 p-3">
-            <div class="val text-success" id="c-active">—</div>
-            <div class="lbl">Active workers</div>
-            <div class="hint">in selected group</div>
+            <div class="val text-success" id="c-instances">—</div>
+            <div class="lbl">Instances</div>
+            <div class="hint">in selected model</div>
         </div>
     </div>
-    <div class="col-12 col-md-4">
+    <div class="col-6 col-md-3">
         <div class="card metric-card h-100 p-3">
-            <div class="val text-primary" id="c-inflight">—</div>
-            <div class="lbl">In-flight requests</div>
-            <div class="hint">currently being served</div>
+            <div class="val text-primary" id="c-active">—</div>
+            <div class="lbl">Active requests</div>
+            <div class="hint">being served now</div>
         </div>
     </div>
-    <div class="col-12 col-md-4">
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-warning" id="c-queued">—</div>
+            <div class="lbl">Queued requests</div>
+            <div class="hint">waiting for an instance</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
         <div class="card metric-card h-100 p-3">
             <div class="val text-info" id="c-rps-live">—</div>
             <div class="lbl">Requests / second</div>
@@ -218,19 +125,22 @@
     </div>
 </div>
 <div class="row g-3 mb-1">
-    <div class="col-lg-6">
-        <div class="card h-100">
-            <div class="card-header"><span class="live-dot"></span>In-flight per worker</div>
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header"><span class="live-dot"></span>Per-instance load</div>
             <div class="card-body p-0">
-                <div class="inflight-table" id="inflight-table-body"></div>
-            </div>
-        </div>
-    </div>
-    <div class="col-lg-6">
-        <div class="card h-100">
-            <div class="card-header"><span class="live-dot"></span>Throughput per worker <span class="text-muted fw-normal" style="font-size:.72rem">· last 5s</span></div>
-            <div class="card-body p-0">
-                <div class="inflight-table" id="throughput-table-body"></div>
+                <table class="table table-sm table-hover inst-metrics-table">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Instance</th>
+                            <th class="d-none d-md-table-cell">Model</th>
+                            <th class="num">Running</th>
+                            <th class="num">Waiting</th>
+                            <th class="num d-none d-sm-table-cell">req/s</th>
+                        </tr>
+                    </thead>
+                    <tbody id="live-instances-body"></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -241,15 +151,8 @@
     <i class="fa-solid fa-clock-rotate-left"></i>
     <span>Rolling window</span>
     <span class="sublabel ms-2">·</span>
-    <span class="sublabel">applies to all charts below</span>
-    <div class="pill-row ms-auto" id="window-pills">
-        <button class="pill" data-win="30">30 sec</button>
-        <button class="pill" data-win="60">1 min</button>
-        <button class="pill" data-win="300">5 min</button>
-        <button class="pill" data-win="900">15 min</button>
-        <button class="pill active" data-win="3600">1 hour</button>
-        <button class="pill" data-win="21600">6 hours</button>
-    </div>
+    <span class="sublabel">applies to everything below</span>
+    <div class="pill-row ms-auto" id="window-pills"></div>
 </div>
 <div class="row g-3 mb-3">
     <div class="col-6 col-md-3">
@@ -275,9 +178,25 @@
     </div>
     <div class="col-6 col-md-3">
         <div class="card metric-card h-100 p-3">
-            <div class="val text-danger" id="c-retries">—</div>
-            <div class="lbl">Retry rate</div>
-            <div class="hint" id="c-retries-hint">retries / requests</div>
+            <div class="val" id="c-ttft">—</div>
+            <div class="lbl">TTFT p50 / p95</div>
+            <div class="hint">time to first token</div>
+        </div>
+    </div>
+</div>
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-info" id="c-migrations">—</div>
+            <div class="lbl">Migrations</div>
+            <div class="hint" id="c-migrations-hint">in window</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="card metric-card h-100 p-3">
+            <div class="val text-danger" id="c-rejections">—</div>
+            <div class="lbl">Rejections</div>
+            <div class="hint" id="c-rejections-hint">in window</div>
         </div>
     </div>
 </div>
@@ -300,47 +219,32 @@
     <div class="col-12 col-lg-7">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <span>Per-worker requests</span>
-                <span class="small text-muted" id="perworker-window-label">in window</span>
+                <span>Per-instance requests</span>
+                <span class="small text-muted" id="perinstance-window-label">in window</span>
             </div>
             <div class="card-body p-0">
-                <div class="inflight-table" id="perworker-table-body"></div>
+                <table class="table table-sm table-hover inst-metrics-table">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Instance</th>
+                            <th class="d-none d-md-table-cell">Model</th>
+                            <th class="num">Requests</th>
+                            <th class="num d-none d-sm-table-cell">Errors</th>
+                        </tr>
+                    </thead>
+                    <tbody id="window-instances-body"></tbody>
+                </table>
             </div>
         </div>
     </div>
     <div class="col-12 col-lg-5">
-        <div class="card h-100 d-flex flex-column">
+        <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span>Latency distribution</span>
                 <span class="small text-muted" id="latency-window-label">in window</span>
             </div>
             <div class="card-body p-0">
-                <div class="inflight-table" id="latency-table-body"></div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="row g-3 mb-3">
-    <div class="col-12 col-lg-6">
-        <div class="card h-100">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="fa-solid fa-shield-halved me-1"></i>CB failures per worker</span>
-                <span class="small text-muted" id="cb-failure-window-label">in window</span>
-            </div>
-            <div class="card-body p-0">
-                <div class="inflight-table" id="cb-failure-table-body"></div>
-            </div>
-        </div>
-    </div>
-    <div class="col-12 col-lg-6">
-        <div class="card h-100">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <span><i class="fa-solid fa-rotate me-1"></i>CB state transitions</span>
-                <span class="small text-muted" id="cb-transitions-window-label">in window</span>
-            </div>
-            <div class="card-body p-0">
-                <div class="inflight-table" id="cb-transitions-body"></div>
+                <div class="hist-list" id="latency-table-body"></div>
             </div>
         </div>
     </div>
@@ -349,16 +253,15 @@
 
 {% block extra_scripts %}
 <script>
-const PALETTE = [
-    '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
-    '#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6',
-    '#6366f1','#a78bfa','#22d3ee','#fde047','#fb7185',
-    '#34d399','#a3e635','#facc15','#60a5fa','#f472b6'
-];
+// Dynamo metrics: the frontend (:11434) is the primary source, per-instance
+// `dynamo_component_*`/`vllm:*` the secondary one. The P2C router is gone, and
+// with it every panel that described its admission state — what it used to
+// surface as failures now shows up as migrations and rejections.
 const ALL_TAB = '__all__';
 const TAB_STORAGE_KEY = 'metrics_selected_tab_v3';
 const WIN_STORAGE_KEY = 'metrics_selected_window_v2';
-const ALLOWED_WINDOWS = [30, 60, 300, 900, 3600, 21600];
+const DEFAULT_WINDOWS = [30, 60, 300, 900, 3600, 21600];
+let allowedWindows = DEFAULT_WINDOWS.slice();
 const POLL_INTERVAL_MS = 5000;
 const HISTORY_INTERVAL_MS = 5000;
 
@@ -374,7 +277,7 @@ let selectedWindow = parseInt(
     || '3600',
     10
 );
-if (!ALLOWED_WINDOWS.includes(selectedWindow)) selectedWindow = 3600;
+if (!allowedWindows.includes(selectedWindow)) selectedWindow = 3600;
 let lastData = null;
 
 function syncUrlState() {
@@ -389,8 +292,14 @@ syncUrlState();
 const WINDOW_LABELS = {
     30: 'last 30s', 60: 'last 1 min', 300: 'last 5 min',
     900: 'last 15 min', 3600: 'last 1 hour', 21600: 'last 6 hours',
+    43200: 'last 12 hours', 86400: 'last 24 hours',
 };
 function windowLabel(s) { return WINDOW_LABELS[s] || `last ${s}s`; }
+function windowPillLabel(s) {
+    if (s < 60) return `${s} sec`;
+    if (s < 3600) return `${Math.round(s / 60)} min`;
+    return `${Math.round(s / 3600)} hour${s >= 7200 ? 's' : ''}`;
+}
 
 function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -401,8 +310,8 @@ function escapeHtml(value) {
         "'": '&#39;'
     }[ch]));
 }
-function shortWorker(w) {
-    if (typeof w === 'object' && w !== null) return w.name || w.url;
+function instanceLabel(w) {
+    if (typeof w === 'object' && w !== null) return w.name || w.url || '—';
     return w;
 }
 function fmtInt(n) {
@@ -417,18 +326,17 @@ function fmtRate(n) {
     if (n >= 10)  return n.toFixed(1);
     return n.toFixed(2);
 }
-function cbStateLabel(s) {
-    if (s === 0) return '<span class="cb-closed fw-bold"><i class="fa-solid fa-circle-check me-1"></i>Closed</span>';
-    if (s === 1) return '<span class="cb-open fw-bold"><i class="fa-solid fa-circle-xmark me-1"></i>Open</span>';
-    if (s === 2) return '<span class="cb-half fw-bold"><i class="fa-solid fa-circle-half-stroke me-1"></i>Half-open</span>';
-    return '<span class="cb-unknown">—</span>';
+function fmtSeconds(v) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    if (n < 1) return (n * 1000).toFixed(0) + ' ms';
+    return n.toFixed(2) + ' s';
 }
-// Tabs group workers by served_model_name (the actual model served, which can
-// differ even when the deployment Config name is the same e.g. gpt-oss-120b vs
-// gpt-oss-120b-low). selectedDep stores the served_model_name.
-function filterWorkers(workers) {
-    if (selectedDep === ALL_TAB) return workers;
-    return workers.filter(w => w.served_model_name === selectedDep);
+// Tabs group instances by served_model_name — the id clients pass in `model`.
+function filterInstances(list) {
+    if (selectedDep === ALL_TAB) return list;
+    return list.filter(w => w.served_model_name === selectedDep);
 }
 
 // ── Charts ───────────────────────────────────────────────────────────────
@@ -451,43 +359,12 @@ const rpsChart = new Chart(rpsCtx, {
     }
 });
 
-const inflightTableBody = document.getElementById('inflight-table-body');
-const throughputTableBody = document.getElementById('throughput-table-body');
-const perworkerTableBody = document.getElementById('perworker-table-body');
+const liveInstancesBody = document.getElementById('live-instances-body');
+const windowInstancesBody = document.getElementById('window-instances-body');
 const latencyTableBody = document.getElementById('latency-table-body');
-// Expansion state per table — shared host name set but tracked separately so
-// expanding "kbds-worker-003" in the in-flight table doesn't also pop it open
-// in the throughput table next to it.
-const inflightExpanded = new Set();
-const throughputExpanded = new Set();
-function toggleInflightGroup(host) {
-    if (inflightExpanded.has(host)) inflightExpanded.delete(host);
-    else inflightExpanded.add(host);
-    if (lastData) renderLive(lastData);
-}
-function toggleThroughputGroup(host) {
-    if (throughputExpanded.has(host)) throughputExpanded.delete(host);
-    else throughputExpanded.add(host);
-    if (lastData) renderLive(lastData);
-}
-const perworkerExpanded = new Set();
-function togglePerworkerGroup(host) {
-    if (perworkerExpanded.has(host)) perworkerExpanded.delete(host);
-    else perworkerExpanded.add(host);
-    if (lastData) renderWindow(lastData);
-}
 
-const cbFailureTableBody = document.getElementById('cb-failure-table-body');
-const cbTransitionsBody = document.getElementById('cb-transitions-body');
-const cbFailureExpanded = new Set();
-function toggleCbFailureGroup(host) {
-    if (cbFailureExpanded.has(host)) cbFailureExpanded.delete(host);
-    else cbFailureExpanded.add(host);
-    if (lastData) renderWindow(lastData);
-}
-
-// ── Live 5-second RPS computed client-side from cumulative processed ─────
-let _liveBuffer = {};   // depKey -> [{ ts_ms, total }, ...]
+// ── Live 5-second RPS computed client-side from cumulative counters ──────
+let _liveBuffer = {};   // model key -> [{ ts_ms, total }, ...]
 function computeLive5sRps(nowMs, totalProcessed) {
     const key = selectedDep;
     const buf = _liveBuffer[key] = (_liveBuffer[key] || []);
@@ -506,13 +383,13 @@ function computeLive5sRps(nowMs, totalProcessed) {
     return delta / dt;
 }
 
-// Per-worker variant of computeLive5sRps. Each worker URL gets its own ring
-// buffer of recent (ts_ms, cumulative_processed) so we can derive a 5s rate
-// without depending on the rolling window selection.
-const _workerLiveBuf = new Map();
-function workerLive5sRps(url, nowMs, processed) {
-    let buf = _workerLiveBuf.get(url);
-    if (!buf) { buf = []; _workerLiveBuf.set(url, buf); }
+// Per-instance variant: each instance URL keeps its own ring buffer of recent
+// (ts_ms, cumulative processed) samples so a 5s rate can be derived without
+// depending on the rolling-window selection.
+const _instanceLiveBuf = new Map();
+function instanceLive5sRps(url, nowMs, processed) {
+    let buf = _instanceLiveBuf.get(url);
+    if (!buf) { buf = []; _instanceLiveBuf.set(url, buf); }
     buf.push({ ts_ms: nowMs, total: processed });
     const drop_before = nowMs - 10_000;
     while (buf.length > 1 && buf[0].ts_ms < drop_before) buf.shift();
@@ -558,7 +435,7 @@ async function refreshRpsHistory() {
     } catch (e) { /* keep chart on transient fetch failure */ }
 }
 
-// ── Tab + window pills ───────────────────────────────────────────────────
+// ── Model tabs + window pills ────────────────────────────────────────────
 function renderTabs(d) {
     const container = document.getElementById('dep-tabs');
     const counts = {};
@@ -582,207 +459,129 @@ function renderTabs(d) {
             syncUrlState();
             container.querySelectorAll('.pill').forEach(p => p.classList.toggle('active', p.getAttribute('data-dep') === selectedDep));
             // Tab change must refresh BOTH live and window sections (the previous
-            // tab's data was scoped to that tab's worker URLs server-side). Use
-            // updateLive=true and don't wait for the next 5s poll tick.
+            // tab's data was scoped server-side). Don't wait for the next tick.
             refreshRpsHistory();
             fetchData(true);
         });
     });
 }
 
-document.querySelectorAll('#window-pills .pill').forEach(el => {
-    el.classList.toggle('active', parseInt(el.dataset.win, 10) === selectedWindow);
-    el.addEventListener('click', () => {
-        const win = parseInt(el.dataset.win, 10);
-        if (win === selectedWindow) return;
-        selectedWindow = win;
-        try { localStorage.setItem(WIN_STORAGE_KEY, String(win)); } catch {}
-        syncUrlState();
-        document.querySelectorAll('#window-pills .pill').forEach(p =>
-            p.classList.toggle('active', parseInt(p.dataset.win, 10) === selectedWindow));
-        // Refresh ONLY the rolling-window section. Live values are intentionally untouched
-        // so they don't appear to "change because of" the window pill.
-        fetchData(false);
-        refreshRpsHistory();
-    });
-});
-
-// ── Render: split into Live and Window so window-pill clicks
-//   only touch the window section. Live keeps polling on its own cadence.
-
-function renderLive(d) {
-    const workers = filterWorkers(d.per_worker || []);
-
-    // LIVE cards
-    document.getElementById('c-active').textContent = workers.length;
-    const inflight = workers.reduce((s, w) => s + (w.running || 0), 0);
-    document.getElementById('c-inflight').textContent = fmtInt(inflight);
-    const sumProcessed = workers.reduce((s, w) => s + (w.processed || 0), 0);
-    const nowMs = (d.timestamp || (Date.now()/1000)) * 1000;
-    const rps5s = computeLive5sRps(nowMs, sumProcessed);
-    document.getElementById('c-rps-live').textContent = fmtRate(rps5s);
-
-    // Build host groups once — both tables share the same grouping.
-    const sorted = [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)));
-    const groups = new Map();
-    for (const w of sorted) {
-        const full = shortWorker(w);
-        const sep = full.lastIndexOf(':');
-        const host = sep === -1 ? full : full.slice(0, sep);
-        if (!groups.has(host)) groups.set(host, []);
-        groups.get(host).push(w);
-    }
-    const groupArr = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-    const cbDotClass = s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown';
-
-    // Per-worker live 5s RPS, plus aggregate per group, from client-side buffer.
-    const workerRps = new Map();
-    for (const w of sorted) {
-        workerRps.set(w.url, workerLive5sRps(w.url, nowMs, w.processed || 0));
-    }
-    // Prune buffers for workers that no longer exist so the map can't grow forever.
-    const _liveUrls = new Set((d.per_worker || []).map(w => w.url));
-    for (const url of [..._workerLiveBuf.keys()]) {
-        if (!_liveUrls.has(url)) _workerLiveBuf.delete(url);
-    }
-    const groupRps = new Map();
-    for (const [host, ws] of groupArr) {
-        let total = 0, any = false;
-        for (const w of ws) {
-            const r = workerRps.get(w.url);
-            if (r != null) { total += r; any = true; }
-        }
-        groupRps.set(host, any ? total : null);
-    }
-
-    renderGroupedTable({
-        body: inflightTableBody,
-        groups: groupArr,
-        expanded: inflightExpanded,
-        toggleFn: 'toggleInflightGroup',
-        workerValue: w => w.running || 0,
-        groupValue: ws => ws.reduce((s, w) => s + (w.running || 0), 0),
-        fmtWorker: v => fmtInt(v),
-        fmtGroup: v => fmtInt(v),
-        unit: '',
-        cbDotClass,
-    });
-    renderGroupedTable({
-        body: throughputTableBody,
-        groups: groupArr,
-        expanded: throughputExpanded,
-        toggleFn: 'toggleThroughputGroup',
-        workerValue: w => workerRps.get(w.url),
-        groupValue: (_, host) => groupRps.get(host),
-        fmtWorker: v => v == null ? '—' : fmtRate(v),
-        fmtGroup: v => v == null ? '—' : fmtRate(v),
-        unit: 'req/s',
-        cbDotClass,
+// The window pills follow `allowed_windows` from the API when it reports them,
+// so the UI can't offer a window the backend won't serve.
+function renderWindowPills() {
+    const container = document.getElementById('window-pills');
+    container.innerHTML = allowedWindows.map(w =>
+        `<button class="pill ${w === selectedWindow ? 'active' : ''}" data-win="${w}">${windowPillLabel(w)}</button>`
+    ).join('');
+    container.querySelectorAll('.pill').forEach(el => {
+        el.addEventListener('click', () => {
+            const win = parseInt(el.dataset.win, 10);
+            if (win === selectedWindow) return;
+            selectedWindow = win;
+            try { localStorage.setItem(WIN_STORAGE_KEY, String(win)); } catch {}
+            syncUrlState();
+            container.querySelectorAll('.pill').forEach(p =>
+                p.classList.toggle('active', parseInt(p.dataset.win, 10) === selectedWindow));
+            // Refresh ONLY the rolling-window section: live values are left alone
+            // so they don't appear to "change because of" the window pill.
+            fetchData(false);
+            refreshRpsHistory();
+        });
     });
 }
+renderWindowPills();
 
-// Shared renderer for In-flight and Throughput tables. Each table maps the same
-// host-grouped worker list onto a different value (current load vs 5s rate) but
-// keeps a consistent collapse/bar/row layout.
-function renderGroupedTable({ body, groups, expanded, toggleFn, workerValue, groupValue, fmtWorker, fmtGroup, unit, cbDotClass }) {
-    const groupVals = groups.map(([host, ws]) => groupValue(ws, host));
-    const maxGroupVal = Math.max(1, ...groupVals.filter(v => v != null));
-    const allWorkerVals = groups.flatMap(([, ws]) => ws.map(workerValue).filter(v => v != null));
-    const maxWorkerVal = Math.max(1, ...allWorkerVals);
-    const unitSpan = unit ? ` <span class="if-rps-unit">${unit}</span>` : '';
-    body.innerHTML = groups.map(([host, ws], gi) => {
-        const gv = groupVals[gi];
-        const groupPct = gv == null ? 0 : Math.min(100, Math.round(gv / maxGroupVal * 100));
-        const openClass = expanded.has(host) ? 'open' : '';
-        const rows = ws.map(w => {
-            const full = shortWorker(w);
-            const sep = full.lastIndexOf(':');
-            const port = sep === -1 ? full : full.slice(sep + 1);
-            const wv = workerValue(w);
-            const pct = wv == null ? 0 : Math.min(100, Math.round(wv / maxWorkerVal * 100));
-            return `<div class="if-row" title="${escapeHtml(full)}">
-                <span class="if-dot ${cbDotClass(w.cb_state)}"></span>
-                <span class="if-port">:${escapeHtml(port)}</span>
-                <div class="if-bar"><div class="if-bar-fill" style="width:${pct}%"></div></div>
-                <span class="if-num">${fmtWorker(wv)}${unitSpan}</span>
-            </div>`;
-        }).join('');
-        return `<div class="if-group ${openClass}" data-host="${escapeHtml(host)}">
-            <div class="if-group-head">
-                <span class="if-caret">▶</span>
-                <span class="if-group-title">${escapeHtml(host)}<span class="if-group-meta">${ws.length} workers</span></span>
-                <div class="if-group-bar"><div class="if-group-bar-fill" style="width:${groupPct}%"></div></div>
-                <span class="if-group-total">${fmtGroup(gv)}${unitSpan}</span>
-            </div>
-            <div class="if-group-body">${rows}</div>
-        </div>`;
-    }).join('') || `<div class="text-center text-muted py-3">No workers</div>`;
-    // Toggle handlers attached via data-host (the toggle functions are globals)
-    // instead of inline onclick, so host names can't break out of the attribute.
-    body.querySelectorAll('.if-group-head').forEach(el => {
-        el.addEventListener('click', () => window[toggleFn](el.parentElement.dataset.host));
-    });
+// ── Render: Live and Window are split so window-pill clicks only touch the
+//   window section. Live keeps polling on its own cadence.
+
+function instanceCells(w) {
+    const label = instanceLabel(w);
+    const sep = String(label).lastIndexOf(':');
+    const host = sep === -1 ? label : String(label).slice(0, sep);
+    const port = sep === -1 ? '' : String(label).slice(sep + 1);
+    return `<td>
+            <div class="inst-name">${escapeHtml(host)}${port ? ':' + escapeHtml(port) : ''}</div>
+            <div class="inst-host">${escapeHtml(w.deployment_name || w.deployment_id || '')}</div>
+        </td>`;
+}
+
+function renderLive(d) {
+    const instances = filterInstances(d.per_worker || []);
+
+    document.getElementById('c-instances').textContent = instances.length;
+    const runningSum = instances.reduce((s, w) => s + (w.running || 0), 0);
+    const waitingSum = instances.reduce((s, w) => s + (w.waiting || 0), 0);
+    // Frontend gauges are authoritative; per-instance sums are the fallback.
+    const active = d.active_requests ?? runningSum;
+    const queued = d.queued_requests ?? waitingSum;
+    document.getElementById('c-active').textContent = fmtInt(active);
+    document.getElementById('c-queued').textContent = fmtInt(queued);
+
+    const sumProcessed = instances.reduce((s, w) => s + (w.processed || 0), 0);
+    const nowMs = (d.timestamp || (Date.now()/1000)) * 1000;
+    document.getElementById('c-rps-live').textContent = fmtRate(computeLive5sRps(nowMs, sumProcessed));
+
+    const perRps = new Map();
+    for (const w of instances) perRps.set(w.url, instanceLive5sRps(w.url, nowMs, w.processed || 0));
+    // Prune buffers for instances that no longer exist so the map can't grow forever.
+    const liveUrls = new Set((d.per_worker || []).map(w => w.url));
+    for (const url of [..._instanceLiveBuf.keys()]) {
+        if (!liveUrls.has(url)) _instanceLiveBuf.delete(url);
+    }
+
+    const sorted = [...instances].sort((a, b) => String(instanceLabel(a)).localeCompare(String(instanceLabel(b))));
+    liveInstancesBody.innerHTML = sorted.map(w => {
+        const rps = perRps.get(w.url);
+        return `<tr>
+            ${instanceCells(w)}
+            <td class="d-none d-md-table-cell"><span class="text-break">${escapeHtml(w.served_model_name || '—')}</span></td>
+            <td class="num">${fmtInt(w.running || 0)}</td>
+            <td class="num">${fmtInt(w.waiting || 0)}</td>
+            <td class="num d-none d-sm-table-cell">${rps == null ? '—' : fmtRate(rps)}</td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="5" class="text-center text-muted py-3">No instances</td></tr>';
 }
 
 function renderWindow(d) {
-    const workers = filterWorkers(d.per_worker || []);
+    const instances = filterInstances(d.per_worker || []);
     const isAll = selectedDep === ALL_TAB;
-    const winLbl = windowLabel(d.window_seconds);
+    const winLbl = windowLabel(d.window_seconds ?? selectedWindow);
 
-    const elWinLabel = document.getElementById('win-label');
-    if (elWinLabel) elWinLabel.textContent = winLbl;
     document.getElementById('rps-window-label').textContent = winLbl;
-    document.getElementById('perworker-window-label').textContent = winLbl;
+    document.getElementById('perinstance-window-label').textContent = winLbl;
+    document.getElementById('latency-window-label').textContent = winLbl;
     document.getElementById('c-rps-hint').textContent = 'avg over ' + winLbl;
     document.getElementById('c-processed-hint').textContent = 'in ' + winLbl;
-    document.getElementById('c-retries-hint').textContent = winLbl;
+    document.getElementById('c-migrations-hint').textContent = 'in ' + winLbl;
+    document.getElementById('c-rejections-hint').textContent = 'in ' + winLbl;
 
-    let rpsWin, processedWin, retryPct, avgLat;
+    let rpsWin, processedWin;
     if (isAll) {
-        rpsWin       = d.rps_window;
+        rpsWin = d.rps_window;
         processedWin = d.requests_window;
-        retryPct     = d.retry_rate_window_pct;
-        avgLat       = d.avg_latency_window_s;
     } else {
-        processedWin = workers.reduce((s, w) => s + (w.processed_window || 0), 0);
-        rpsWin       = d.window_seconds ? processedWin / d.window_seconds : null;
-        retryPct = d.retry_rate_window_pct;
-        avgLat   = d.avg_latency_window_s;
+        // Per-model totals are summed from the instances serving that model.
+        processedWin = instances.reduce((s, w) => s + (w.processed_window || 0), 0);
+        rpsWin = d.window_seconds ? processedWin / d.window_seconds : null;
     }
-    document.getElementById('c-rps').textContent       = fmtRate(rpsWin);
+    document.getElementById('c-rps').textContent = fmtRate(rpsWin);
     document.getElementById('c-processed').textContent = fmtInt(processedWin);
-    document.getElementById('c-latency').textContent   = (avgLat || 0).toFixed(2) + ' s';
-    document.getElementById('c-retries').textContent   = (retryPct || 0).toFixed(2) + ' %';
+    document.getElementById('c-latency').textContent = fmtSeconds(d.avg_latency_window_s);
+    document.getElementById('c-ttft').textContent =
+        `${fmtSeconds(d.ttft_p50_s)} / ${fmtSeconds(d.ttft_p95_s)}`;
+    document.getElementById('c-migrations').textContent = fmtInt(d.migrations_window);
+    document.getElementById('c-rejections').textContent = fmtInt(d.rejections_window);
 
-    // Per-worker requests (windowed) — reuse the grouped-table UI from the LIVE
-    // section so this looks consistent with In-flight / Throughput tables above.
-    const pwGroups = new Map();
-    for (const w of [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)))) {
-        const full = shortWorker(w);
-        const sep = full.lastIndexOf(':');
-        const host = sep === -1 ? full : full.slice(0, sep);
-        if (!pwGroups.has(host)) pwGroups.set(host, []);
-        pwGroups.get(host).push(w);
-    }
-    const pwGroupArr = [...pwGroups.entries()].sort((a, b) => b[1].length - a[1].length);
-    const cbDotClass = s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown';
-    renderGroupedTable({
-        body: perworkerTableBody,
-        groups: pwGroupArr,
-        expanded: perworkerExpanded,
-        toggleFn: 'togglePerworkerGroup',
-        workerValue: w => w.processed_window || 0,
-        groupValue: ws => ws.reduce((s, w) => s + (w.processed_window || 0), 0),
-        fmtWorker: v => fmtInt(v),
-        fmtGroup: v => fmtInt(v),
-        unit: '',
-        cbDotClass,
-    });
+    const sorted = [...instances].sort((a, b) => String(instanceLabel(a)).localeCompare(String(instanceLabel(b))));
+    windowInstancesBody.innerHTML = sorted.map(w => `<tr>
+            ${instanceCells(w)}
+            <td class="d-none d-md-table-cell"><span class="text-break">${escapeHtml(w.served_model_name || '—')}</span></td>
+            <td class="num">${fmtInt(w.processed_window || 0)}</td>
+            <td class="num d-none d-sm-table-cell">${fmtInt(w.errors || 0)}</td>
+        </tr>`).join('') || '<tr><td colspan="4" class="text-center text-muted py-3">No instances</td></tr>';
 
-    // Latency distribution (windowed) — one row per bucket with an intensity bar.
-    const elLat = document.getElementById('latency-window-label');
-    if (elLat) elLat.textContent = winLbl;
-    const histSrc = d.latency_histogram_window || d.latency_histogram || [];
+    // Latency distribution — one row per bucket, empty edges trimmed.
+    const histSrc = d.latency_histogram_window || [];
     let lo = 0, hi = histSrc.length - 1;
     while (lo < histSrc.length && histSrc[lo].count === 0) lo++;
     while (hi > lo && histSrc[hi].count === 0) hi--;
@@ -794,55 +593,12 @@ function renderWindow(d) {
         const label = `${lower}–${b.le}s`;
         const pct = Math.min(100, Math.round(b.count / maxBucket * 100));
         const sharePct = (b.count / latTotal * 100).toFixed(1);
-        return `<div class="if-row" title="${label} — ${fmtInt(b.count)} requests (${sharePct}%)" style="grid-template-columns: 90px 1fr 90px;">
-            <span class="if-port" style="font-family: inherit; font-size: .78rem; color: #4b5563;">${label}</span>
-            <div class="if-bar" style="height: 7px;"><div class="if-bar-fill" style="width:${pct}%; background: linear-gradient(90deg, #818cf8, #6366f1);"></div></div>
-            <span class="if-num">${fmtInt(b.count)} <span class="if-rps-unit">${sharePct}%</span></span>
+        return `<div class="hist-row" title="${escapeHtml(label)} — ${fmtInt(b.count)} requests (${sharePct}%)">
+            <span class="hist-label">${escapeHtml(label)}</span>
+            <div class="hist-bar"><div class="hist-bar-fill" style="width:${pct}%"></div></div>
+            <span class="hist-num">${fmtInt(b.count)} <span class="hist-unit">${sharePct}%</span></span>
         </div>`;
-    }).join('') || `<div class="text-center text-muted py-3">No latency data</div>`;
-
-    // CB failures per worker (windowed). Same grouped-table UI as everything else.
-    document.getElementById('cb-failure-window-label').textContent = winLbl;
-    const cbGroups = new Map();
-    for (const w of [...workers].sort((a, b) => shortWorker(a).localeCompare(shortWorker(b)))) {
-        const full = shortWorker(w);
-        const sep = full.lastIndexOf(':');
-        const host = sep === -1 ? full : full.slice(0, sep);
-        if (!cbGroups.has(host)) cbGroups.set(host, []);
-        cbGroups.get(host).push(w);
-    }
-    const cbGroupArr = [...cbGroups.entries()].sort((a, b) => b[1].length - a[1].length);
-    renderGroupedTable({
-        body: cbFailureTableBody,
-        groups: cbGroupArr,
-        expanded: cbFailureExpanded,
-        toggleFn: 'toggleCbFailureGroup',
-        workerValue: w => w.cb_failure_window || 0,
-        groupValue: ws => ws.reduce((s, w) => s + (w.cb_failure_window || 0), 0),
-        fmtWorker: v => fmtInt(v),
-        fmtGroup: v => fmtInt(v),
-        unit: '',
-        cbDotClass: s => s === 0 ? '' : s === 1 ? 's-open' : s === 2 ? 's-half' : 's-unknown',
-    });
-
-    // CB state transitions (windowed) — flat list of transitions that happened
-    // in this window. Hidden when nothing has transitioned.
-    document.getElementById('cb-transitions-window-label').textContent = winLbl;
-    const transRows = (d.cb_transitions || []).filter(t => {
-        if (isAll) return true;
-        const found = (d.per_worker || []).find(w => w.url === t.worker);
-        return found && found.served_model_name === selectedDep;
-    });
-    cbTransitionsBody.innerHTML = transRows.length === 0
-        ? '<div class="text-center text-muted py-3">No transitions in this window</div>'
-        : transRows.map(t => `
-            <div class="if-row" style="grid-template-columns: 1fr auto auto auto 56px;" title="cumulative: ${t.count}">
-                <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(t.name || t.worker)}</span>
-                <span class="badge bg-secondary" style="font-size:.65rem;">${escapeHtml(t.from_state)}</span>
-                <span style="color:#9ca3af;">→</span>
-                <span class="badge bg-secondary" style="font-size:.65rem;">${escapeHtml(t.to_state)}</span>
-                <span class="if-num">${t.count_window}</span>
-            </div>`).join('');
+    }).join('') || '<div class="text-center text-muted py-3">No latency data</div>';
 }
 
 async function fetchData(updateLive) {
@@ -858,6 +614,15 @@ async function fetchData(updateLive) {
         }
         document.getElementById('error-msg').classList.add('d-none');
         lastData = d;
+        if (Array.isArray(d.allowed_windows) && d.allowed_windows.length
+            && d.allowed_windows.join(',') !== allowedWindows.join(',')) {
+            allowedWindows = d.allowed_windows.slice();
+            if (!allowedWindows.includes(selectedWindow)) {
+                selectedWindow = d.window_seconds || allowedWindows[0];
+                syncUrlState();
+            }
+            renderWindowPills();
+        }
         renderTabs(d);
         renderWindow(d);
         if (updateLive) renderLive(d);
