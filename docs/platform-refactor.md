@@ -35,28 +35,41 @@ central (:8080) ── 배포/정지/health/버전/UI ── worker agent (:8085
 
 ## 3. 작업 트랙
 
-### A. central 백엔드 (main.py / manager.py)
-- [ ] P2C 라우터 코드 제거: `_p2c_register/_p2c_deregister/sync_p2c_workers`, `P2C_ROUTER_URL`, `ROUTER_METRICS_URL/ROUTER_WORKERS_URL`,
+### A. central 백엔드 (main.py / manager.py) — 완료 (3076abb, 58ccc72)
+- [x] P2C 라우터 코드 제거: `_p2c_register/_p2c_deregister/sync_p2c_workers`, `P2C_ROUTER_URL`, `ROUTER_METRICS_URL/ROUTER_WORKERS_URL`,
       `vllm_router_*` 파싱, CB/retry 지표 전부.
-- [ ] 엔진 기본값 `dynamo`; `ollama` 제거; `vllm`은 legacy 플래그.
-- [ ] Dynamo 네이티브 API: `GET /api/frontend`(health, models, 요약 지표), `GET /api/instances`(etcd 인스턴스 ⨝ 배포 노드 ⨝ system 포트 지표),
+- [x] 엔진 기본값 `dynamo`; `ollama` 제거; `vllm`은 legacy 플래그.
+- [x] Dynamo 네이티브 API: `GET /api/frontend`(health, models, 요약 지표), `GET /api/instances`(etcd 인스턴스 ⨝ 배포 노드 ⨝ system 포트 지표),
       `GET /api/prometheus_stats`·`/api/rps_history`를 프론트/워커 지표 기준으로 재작성.
-- [ ] etcd 조회: gRPC-gateway(`POST /v3/kv/range`)로 `v1/instances/` 프리픽스 읽기.
-- [ ] 배포 스키마 정리(Dynamo 필드 1급), 배포 레코드에 설정 저장(max_len/gpu_util/extra_args/parsers) — 재배포·이전 가능하게.
-- [ ] health: system `/health` + 프론트 `/v1/models` 포함 여부.
+- [x] etcd 조회: gRPC-gateway(`POST /v3/kv/range`)로 `v1/instances/` 프리픽스 읽기.
+- [x] 배포 스키마 정리(Dynamo 필드 1급), 배포 레코드에 설정 저장(max_len/gpu_util/extra_args/parsers) — 재배포·이전 가능하게.
+- [x] health: system `/health` + 프론트 `/v1/models` 포함 여부.
 
-### B. worker 에이전트
-- [ ] 기본 엔진 dynamo, ollama 템플릿/분기 제거, dynamo 경로에서 TLS 인증서 생성 제거.
-- [ ] GPU 상태를 19GB vLLM 이미지 대신 호스트 `nvidia-smi`(nsenter)로.
-- [ ] 시작 시 기존 dynamo 배포의 방화벽 규칙 재적용(`_ensure_host_ports_open`).
-- [ ] `list_vllm_images` → 엔진 이미지 전체(dynamo 포함).
+### B. worker 에이전트 — 완료 (3076abb)
+- [x] 기본 엔진 dynamo, ollama 템플릿/분기 제거, dynamo 경로에서 TLS 인증서 생성 제거.
+- [ ] (남음) GPU 상태를 19GB vLLM 이미지 대신 호스트 `nvidia-smi`(nsenter)로.
+- [x] 시작 시 기존 dynamo 배포의 방화벽 규칙 재적용(`_ensure_host_ports_open`).
+- [x] `list_vllm_images` → 엔진 이미지 전체(dynamo 포함).
 
-### C. UI (omniserve 웹) — `docs/omniserve-ui-redesign.md`
-- [ ] 대시보드/모델/배포/호스트/로그/API 페이지를 Dynamo 정보모델로 재구성, 라우터 페이지(metrics.html 'Router Metrics', gateway) 대체.
+### C. UI (omniserve 웹) — 완료 (36b1490 머지) — `docs/omniserve-ui-redesign.md`
+- [x] 대시보드/모델/배포/호스트/로그/API 페이지를 Dynamo 정보모델로 재구성, 라우터 페이지(metrics.html 'Router Metrics', gateway) 대체.
 
 ### D. 테스트
 - [ ] `tests/integration/test_router.py`(Rust 라우터) 제거 → `tests/integration/test_frontend.py`(라이브 프론트 또는 mock).
 - [ ] 단위: 네임스페이스 슬러그, 파서 추론, node_url, Dynamo 지표 파싱, 워커 템플릿 렌더.
 
-### E. 정리
-- [ ] `central/router`(Rust) 삭제(별도 커밋, 되돌리기 쉽게), Dockerfile.router·compose 잔재·문서 정리, README 갱신.
+### E. 정리 — 완료 (a6031c4)
+- [x] `central/router`(Rust) 삭제(별도 커밋, 되돌리기 쉽게), Dockerfile.router·compose 잔재·문서 정리, README 갱신.
+
+## 전환 중 발견해 고친 것 (2026-09-11~14)
+
+| 증상 | 원인 | 조치 |
+|---|---|---|
+| 워커가 `DYN_SYSTEM_PORT` 파싱 실패로 크래시 루프 | Dynamo가 i16으로 읽음(≤32767) | system 포트 = base+10000 |
+| 두 번째 모델 등록 거부 | 네임스페이스당 모델 1개 | 모델별 `dynamo-<slug>` + 프론트 `--namespace-prefix` |
+| 임베딩 500 "KV routing should not call generate on PushRouter" | pooling 모델은 kv 라우팅 불가 | 프론트 `--router-mode least-loaded` |
+| 원격(heart3) 워커 요청 120초 타임아웃 | 프론트가 브리지 IP(172.18.x)를 광고 → 워커가 응답 스트림 역방향 연결 불가 | 프론트 `network_mode: host` |
+| 전 모델 404, 등록 무한 재시도 | `DYN_TCP_RESPONSE_STREAM_HOST`에 IP 리터럴을 넣으면 1.4.2가 "Interface not found" | 해당 변수 제거(호스트 netns 자동 감지) |
+| 워커 요청 플레인 포트가 매번 랜덤 | `DYN_TCP_RPC_PORT` 미지정 시 OS 할당 | base+12000으로 고정 |
+| host-net 워커 포트가 원격에서 timeout | Docker `-p`가 열어주던 방화벽 규칙이 host 네트워크에는 없음 | 배포 시/에이전트 기동 시 INPUT ACCEPT 삽입 |
+| GPU 제거 후에도 인스턴스가 계속 보임 | `stop_replica`가 `gpus`만 지우고 `nodes`를 남김 | 노드도 함께 제거 |
