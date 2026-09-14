@@ -127,7 +127,13 @@ async def get_gpus():
 
 @app.get("/api/deployments")
 async def get_deployments():
-    return manager.load_deployments()
+    """Deployments with their stored engine settings; each node carries the URL
+    central uses for health and metrics (system port for dynamo)."""
+    deps = manager.load_deployments()
+    for dep in deps:
+        for node in dep.get("nodes", []):
+            node["url"] = dynamo.node_url(dep, node)
+    return deps
 
 @app.get("/api/configs")
 async def get_configs():
@@ -318,6 +324,7 @@ def _instance_rows() -> list:
         worker_id, gpu = (m.group(1), m.group(2)) if m else ("", "")
         rows.append({
             "url": url,
+            "system_url": url,           # contract alias
             "name": f"{worker_id or node['host']}:{dynamo.node_api_port(dep, node)}",
             "deployment_id": dep["id"],
             "deployment_name": dep.get("name"),
@@ -333,7 +340,9 @@ def _instance_rows() -> list:
             "inflight": s.get("inflight", 0),
             "kv_cache_usage_pct": s.get("kv_cache_usage_pct", 0.0),
             "processed": s.get("requests_total", 0),
+            "requests_total": s.get("requests_total", 0),   # contract alias
             "errors": s.get("errors_total", 0),
+            "errors_total": s.get("errors_total", 0),       # contract alias
         })
     return rows
 

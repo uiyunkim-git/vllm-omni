@@ -47,52 +47,6 @@ services:
         aliases:
           - tailscale
 
-  vllm_router_p2c:
-    build:
-      context: ./central/router
-      dockerfile: Dockerfile.router
-    container_name: vllm_omni_router_p2c
-    restart: unless-stopped
-    depends_on:
-      - tailscale
-    cap_add:
-      - NET_ADMIN
-    ports:
-      - "11434:8080"
-      - "29000:29000"
-    environment:
-      - ROUTER_STATE_FILE=/var/lib/vllm-router/workers.json
-      - TAILSCALE_GATEWAY_HOST=tailscale
-      - TAILSCALE_SUBNET=100.64.0.0/10
-    volumes:
-      - router-state:/var/lib/vllm-router
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        GW=$$(getent hosts $${TAILSCALE_GATEWAY_HOST} | awk '{print $$1}')
-        if [ -n "$$GW" ]; then
-          echo "Adding route $${TAILSCALE_SUBNET} via $$GW (tailscale gateway)"
-          ip route replace $${TAILSCALE_SUBNET} via $$GW || echo "route add failed (non-fatal)"
-        else
-          echo "WARN: tailscale host not resolvable, skipping route setup"
-        fi
-        exec "$$@"
-      - "--"
-    command: >
-      vllm-router
-      --host 0.0.0.0
-      --port 8080
-      --prometheus-host 0.0.0.0
-      --prometheus-port 29000
-      --policy least_connections
-      --max-concurrent-requests 16384
-      --retry-max-retries 2
-      --cb-failure-threshold 30
-      --cb-timeout-duration-secs 20
-    networks:
-      vllm_network:
-
   # ── Dynamo data plane ────────────────────────────────────────────────────
   # etcd: service discovery for `dynamo.vllm` workers on every host (they register
   # here; the frontend watches it). Single node is fine — it holds only leases.
@@ -190,7 +144,6 @@ services:
 
 volumes:
   tailscale-state:
-  router-state:
   etcd-data:
 
 networks:
