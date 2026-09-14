@@ -464,7 +464,15 @@ class CentralManager:
             if global_gpu_id not in dep["gpus"]:
                 return False
 
+            wid, gpu_idx = global_gpu_id.rsplit("-", 1)
             dep["gpus"].remove(global_gpu_id)
+            # Drop the node too. Leaving it behind kept a ghost instance in
+            # /api/deployments (and so in the dashboard, health probes and the
+            # metrics tables) for the rest of the deployment's life.
+            dep["nodes"] = [
+                n for n in dep.get("nodes", [])
+                if not str(n.get("name", "")).endswith(f"_{wid}_{gpu_idx}")
+            ]
             if not dep["gpus"]:
                 del deps[dep_index]
             else:
@@ -472,7 +480,6 @@ class CentralManager:
 
             self.save_deployments(deps)
 
-        wid, gpu_idx = global_gpu_id.rsplit("-", 1)
         all_workers = self.get_workers()
         if wid in all_workers:
             worker = all_workers[wid]
