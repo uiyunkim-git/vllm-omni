@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Bootstraps a virtualenv and runs the test suite.
 #
-#   ./run_tests.sh                 # unit + integration (integration skips w/o docker)
-#   ./run_tests.sh unit            # unit layer only  (<10s, no docker needed)
-#   ./run_tests.sh integration     # router-in-docker layer
-#   ./run_tests.sh unit -k window  # extra args pass straight to pytest
+#   ./run_tests.sh                  # unit layer: offline, no docker, no network
+#   ./run_tests.sh unit -k namespace   # extra args pass straight to pytest
+#   ./run_tests.sh integration      # central vs. mock worker agent (loopback only)
+#   ./run_tests.sh all              # unit + integration
+#   RUN_LIVE=1 ./run_tests.sh e2e   # opt-in smoke against a RUNNING stack
 #
 # The venv lives at tests/.venv and is reused across runs.
 set -euo pipefail
@@ -35,4 +36,11 @@ source .venv/bin/activate
 
 pip install --quiet --disable-pip-version-check -r requirements.txt
 
-exec python -m pytest "$@"
+# Expand the convenience target "all"; everything else goes to pytest verbatim.
+args=("$@")
+if [ "${1:-}" = "all" ]; then
+    shift
+    args=(unit integration "$@")
+fi
+
+exec python -m pytest "${args[@]}"
