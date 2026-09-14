@@ -3,7 +3,6 @@ let gpus = [];
 let deployments = [];
 let savedConfigs = [];
 let endpoints = {};
-let depGroupCollapsed = new Set();
 let gpuGroupCollapsed = new Set();
 const epImages = new Map();       // worker_id -> images[] cache
 const pullInProgress = new Set(); // worker_ids currently pulling an image
@@ -12,6 +11,18 @@ const modelDownloadInProgress = new Set();
 const _endpointActions = new Map();
 const _stopping = new Set(); // keys: dep id or "depId:gpu" for replicas
 let versionInfo = null;      // last GET /api/version payload (worker versions panel)
+let frontendInfo = null;     // last GET /api/frontend payload (Dynamo frontend)
+let hostGroupCollapsed = new Set(); // collapsed host sections on the dashboard
+
+// Default images per engine. Dynamo instances are served through the frontend;
+// `vllm` is the legacy path (its own HTTPS endpoint, not behind the frontend).
+const ENGINE_IMAGE = {
+    dynamo: 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2',
+    vllm: 'vllm/vllm-openai:latest',
+};
+// Fixed KV block size — the worker and the frontend must agree on it
+// (`--kv-cache-block-size`), so it is shown read-only in the deploy form.
+const KV_BLOCK_SIZE = 64;
 
 document.addEventListener('DOMContentLoaded', () => {
     // Self-rescheduling poll (re-armed in finally) so a slow response can't
@@ -79,10 +90,17 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => showAlert('success', '배포가 성공적으로 시작되었습니다.'), 300);
     }
 
-    // Populate image datalist when deploy modal opens
+    // Populate image datalist when the deploy modal opens
     document.getElementById('deployModal')?.addEventListener('show.bs.modal', () => {
-        if (document.getElementById('deployEngine')?.value === 'vllm') fetchAllWorkerImages();
+        fetchAllWorkerImages();
     });
+
+    // Deploy form: apply the engine-dependent hints once on load, and fill the
+    // read-only KV block size from the single source of truth above.
+    if (document.getElementById('deployEngine') && typeof window.handleEngineChange === 'function') {
+        document.querySelectorAll('.kv-block-size').forEach(el => { el.value = KV_BLOCK_SIZE; });
+        window.handleEngineChange();
+    }
 
     // Gateway test panel API key: prefill from localStorage, persist on change
     const gwApiKeyEl = document.getElementById('gw-api-key');
@@ -96,22 +114,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function fetchStatus() {
     try {
-        const [gpusRes, depsRes, confsRes, endpRes] = await Promise.all([
+        const [gpusRes, depsRes, confsRes, endpRes, frontRes] = await Promise.all([
             fetch('/api/gpus'),
             fetch('/api/deployments'),
             fetch('/api/configs'),
-            fetch('/api/endpoints')
+            fetch('/api/endpoints'),
+            fetch('/api/frontend').catch(() => null)
         ]);
         gpus = await gpusRes.json();
         deployments = await depsRes.json();
         savedConfigs = await confsRes.json();
         endpoints = await endpRes.json();
+        // The frontend summary is optional: on a transient failure we keep the
+        // previous payload and the UI degrades to "—" rather than blanking out.
+        if (frontRes && frontRes.ok) {
+            frontendInfo = await frontRes.json().catch(() => frontendInfo);
+        }
 
+        if (document.getElementById('frontend-status')) renderFrontendStatus();
         if (document.getElementById('gpu-cards-container') || document.getElementById('deployGpusGrid')) renderGPUs();
-        if (document.getElementById('deployments-table-body')) renderDeployments();
+        if (document.getElementById('deployments-container')) renderDeployments();
         if (document.getElementById('saved-configs-container')) renderConfigs();
         if (document.getElementById('pending-endpoints-container')) renderEndpoints();
-        if (document.getElementById('gw-deployments-list')) renderGateway();
+        if (document.getElementById('gw-models-list')) renderGateway();
     } catch (err) {
         console.error("Failed to fetch status", err);
     }
@@ -146,7 +171,7 @@ function renderGPUs() {
     }
 
     if (gpus.length === 0) {
-        if (list) list.innerHTML = '<p class="text-muted mb-0 p-2">No active GPUs available. Make sure to accept pending endpoints.</p>';
+        if (list) list.innerHTML = '<p class="text-muted mb-0 p-2">No active GPUs available. Accept a pending host first.</p>';
         return;
     }
 
@@ -339,11 +364,6 @@ window.validateDeployGpus = function () {
     }
 }
 
-function formatRate(value) {
-    const numeric = Number(value) || 0;
-    return numeric >= 100 ? numeric.toFixed(0) : numeric.toFixed(1);
-}
-
 function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
         '&': '&amp;',
@@ -356,251 +376,411 @@ function escapeHtml(value) {
 
 
 
-function renderDeployments() {
-    const list = document.getElementById('deployments-table-body');
-    if (!list) return;
-    list.innerHTML = '';
+// ─── Dynamo frontend status (dashboard) ────────────────────────────────
+function fmtNum(v) {
+    if (v === null || v === undefined || v === '') return '—';
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e4) return (n / 1e3).toFixed(1) + 'k';
+    return String(Math.round(n));
+}
 
-    if (deployments.length === 0) {
-        list.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No active deployments.</td></tr>';
+// Browser-reachable base URL of the Dynamo frontend. `/api/frontend` reports the
+// URL as *central* reaches it, which can be a loopback address — in that case we
+// keep the port but swap in the host the browser is already talking to.
+function frontendBaseUrl() {
+    const raw = frontendInfo && frontendInfo.url;
+    if (raw) {
+        try {
+            const u = new URL(raw);
+            const local = /^(127\.|0\.0\.0\.0$|localhost$|\[::1\]$|::1$)/.test(u.hostname);
+            const port = u.port || '11434';
+            if (!local) return `${u.protocol}//${u.host}`.replace(/\/+$/, '');
+            return `${u.protocol}//${window.location.hostname}:${port}`;
+        } catch (e) { /* fall through to the default below */ }
+    }
+    return `http://${window.location.hostname}:11434`;
+}
+
+function renderFrontendStatus() {
+    const el = document.getElementById('frontend-status');
+    if (!el) return;
+    const fe = frontendInfo;
+    const models = (fe && Array.isArray(fe.models)) ? fe.models : [];
+    const metrics = (fe && fe.metrics) || {};
+    const instanceCount = models.reduce((s, m) => s + (Number(m.instances) || 0), 0);
+    const healthy = fe ? !!fe.healthy : false;
+    const color = !fe ? '#9ca3af' : healthy ? '#22c55e' : '#ef4444';
+    const label = !fe ? 'Unknown' : healthy ? 'Healthy' : 'Unreachable';
+
+    const modelRows = models.length === 0
+        ? '<div class="text-muted small px-3 pb-3">No models registered on the frontend.</div>'
+        : `<div class="fe-model-list">${models.map(m => `
+            <div class="fe-model-row">
+                <span class="status-dot" style="background:${m.ready ? '#22c55e' : '#f59e0b'}"></span>
+                <span class="font-monospace small text-truncate" title="${escapeHtml(m.id)}">${escapeHtml(m.id)}</span>
+                <span class="text-muted small font-monospace">${escapeHtml(m.namespace ?? '—')}</span>
+                <span class="badge bg-light text-secondary border">${fmtNum(m.instances)} inst</span>
+            </div>`).join('')}</div>`;
+
+    el.innerHTML = `
+        <div class="stat-strip">
+            <div class="stat-item">
+                <div class="val" style="color:${color}"><span class="status-dot" style="background:${color}"></span>${escapeHtml(label)}</div>
+                <div class="lbl">Frontend</div>
+            </div>
+            <div class="stat-item">
+                <div class="val">${escapeHtml((fe && fe.router_mode) || '—')}</div>
+                <div class="lbl">Router mode</div>
+            </div>
+            <div class="stat-item">
+                <div class="val">${models.length}</div>
+                <div class="lbl">Models</div>
+            </div>
+            <div class="stat-item">
+                <div class="val">${instanceCount}</div>
+                <div class="lbl">Instances</div>
+            </div>
+            <div class="stat-item">
+                <div class="val">${fmtNum(metrics.active_requests)}</div>
+                <div class="lbl">Active req</div>
+            </div>
+            <div class="stat-item">
+                <div class="val">${fmtNum(metrics.queued_requests)}</div>
+                <div class="lbl">Queued req</div>
+            </div>
+            <div class="stat-item stat-item-url">
+                <div class="val font-monospace" style="font-size:.92rem">${escapeHtml(frontendBaseUrl())}/v1</div>
+                <div class="lbl">Base URL</div>
+            </div>
+        </div>
+        ${modelRows}`;
+}
+
+// ─── Deployments (per host) ────────────────────────────────────────────
+// Global GPU ids are `<worker_id>-<local_index>`.
+function widOfGpu(globalGpuId) {
+    const g = String(globalGpuId || '');
+    const i = g.lastIndexOf('-');
+    return i >= 0 ? g.substring(0, i) : g;
+}
+function gpuIndexOf(globalGpuId) {
+    const g = String(globalGpuId || '');
+    const i = g.lastIndexOf('-');
+    return i >= 0 ? g.substring(i + 1) : g;
+}
+function hostDisplayName(wid) {
+    const ep = endpoints && endpoints[wid];
+    return (ep && ep.name) || wid;
+}
+// Stable per-host key: used both for the "stop all on host" action map and as a
+// row class, so stopping a host can fade its rows immediately.
+function hostKeyOf(wid) {
+    return ('h_' + String(wid)).replace(/[^a-zA-Z0-9_]/g, '_');
+}
+// Container names are `<engine>_<deployId>_<worker>_<gpu>` (worker/manager.py);
+// the prefix follows the deployment engine or dynamo instances never match and
+// show as "Starting" with no logs.
+function enginePrefix(engine) {
+    const e = String(engine || 'dynamo').toLowerCase();
+    return e === 'dynamo' ? 'dynamo' : e === 'ollama' ? 'ollama' : 'vllm';
+}
+function engineBadge(engine) {
+    const e = String(engine || 'dynamo').toUpperCase();
+    if (e === 'DYNAMO') return '<span class="badge bg-success" title="Served through the Dynamo frontend">DYNAMO</span>';
+    if (e === 'VLLM') return '<span class="badge bg-secondary" title="Legacy: direct endpoint, not served by the frontend">VLLM</span>';
+    return `<span class="badge bg-light text-secondary border">${escapeHtml(e)}</span>`;
+}
+function statusDot(isRunning) {
+    return isRunning
+        ? '<span class="st-dot-wrap"><span class="status-dot" style="background:#22c55e"></span><span class="small">Running</span></span>'
+        : '<span class="st-dot-wrap"><span class="status-dot" style="background:#f59e0b"></span><span class="small text-muted">Starting</span></span>';
+}
+
+function renderDeployments() {
+    const container = document.getElementById('deployments-container');
+    if (!container) return;
+
+    if (!deployments || deployments.length === 0) {
+        container.innerHTML = '<div class="card"><div class="p-3 text-muted mb-0">No active deployments.</div></div>';
         return;
     }
 
-    // Group by served_model_name (fallback to model)
-    const groupMap = new Map();
+    // One entry per instance: a replica group has one container per GPU, a TP
+    // deployment has a single container spanning all of its GPUs.
+    const instances = [];
     deployments.forEach(dep => {
-        const key = dep.served_model_name || dep.model;
-        if (!groupMap.has(key)) groupMap.set(key, []);
-        groupMap.get(key).push(dep);
+        const gpuList = dep.gpus || [];
+        const multi = (dep.deployment_type || '').toLowerCase() === 'replicas' && gpuList.length > 1;
+        if (multi) {
+            gpuList.forEach(gpu => instances.push({ dep, gpu, gpus: [gpu], wid: widOfGpu(gpu), multi: true }));
+        } else {
+            const first = gpuList[0] || '';
+            instances.push({ dep, gpu: first, gpus: gpuList, wid: widOfGpu(first), multi: false });
+        }
     });
 
-    groupMap.forEach((deps, servedName) => {
-        // Deterministic gid so collapse state survives re-renders
-        const gid = 'dg_' + servedName.replace(/[^a-zA-Z0-9]/g, '_');
-        const collapsed = depGroupCollapsed.has(gid);
-        const rowDisplay = collapsed ? 'display:none' : '';
+    // host -> (deployment id -> instances)
+    const hosts = new Map();
+    instances.forEach(inst => {
+        if (!hosts.has(inst.wid)) hosts.set(inst.wid, new Map());
+        const byDep = hosts.get(inst.wid);
+        if (!byDep.has(inst.dep.id)) byDep.set(inst.dep.id, []);
+        byDep.get(inst.dep.id).push(inst);
+    });
+    const sortedHosts = [...hosts.entries()]
+        .sort((a, b) => hostDisplayName(a[0]).localeCompare(hostDisplayName(b[0])));
 
-        const allRunning = deps.every(d => (d.nodes || []).length > 0 && (d.nodes || []).every(n => n.is_healthy));
-        const totalGpuCount = [...new Set(deps.flatMap(d => d.gpus || []))].length;
-        const depIds = deps.map(d => d.id).join(',');
-        const replicaCount = deps.reduce((sum, d) =>
-            (d.deployment_type || '').toLowerCase() === 'replicas' ? sum + (d.gpus || []).length : sum + 1, 0);
+    container.innerHTML = sortedHosts.map(([wid, byDep]) => {
+        const epKey = hostKeyOf(wid);
+        const hostInstances = [...byDep.values()].flat();
+        _endpointActions.set(epKey, hostInstances);
+        const collapsed = hostGroupCollapsed.has(wid);
+        const body = collapsed ? 'display:none' : '';
+        const caret = collapsed ? 'transform:rotate(-90deg)' : '';
+        const depCount = byDep.size;
+        const healthy = hostInstances.filter(i => instanceHealthy(i)).length;
 
-        const groupStatusHtml = allRunning
-            ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:#22c55e;display:inline-block"></span><span class="small">Running</span></span>`
-            : `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block"></span><span class="small text-muted">Starting</span></span>`;
+        const groups = [...byDep.values()]
+            .sort((a, b) => (a[0].dep.name || '').localeCompare(b[0].dep.name || ''))
+            .map(list => renderDeploymentGroup(list))
+            .join('');
 
-        const iconTransform = collapsed ? 'transform:rotate(-90deg)' : '';
-        list.innerHTML += `
-            <tr style="background:#f1f5f9;cursor:pointer" onclick="toggleDepGroup('${gid}')">
-                <td colspan="3">
-                    <div class="d-flex align-items-center gap-2">
-                        <i class="fa-solid fa-chevron-down" id="${gid}-icon" style="font-size:.72rem;transition:transform .2s;color:#6b7280;${iconTransform}"></i>
-                        <span class="fw-semibold">${escapeHtml(servedName)}</span>
-                        <span class="badge bg-secondary" style="font-size:.75rem">${replicaCount} replica${replicaCount > 1 ? 's' : ''}</span>
-                        ${groupStatusHtml}
-                    </div>
-                </td>
-                <td class="text-muted small">${totalGpuCount} GPU${totalGpuCount !== 1 ? 's' : ''} total</td>
-                <td></td>
-                <td></td>
-            </tr>
-        `;
+        return `
+            <div class="card dep-host-group mb-3">
+                <div class="dep-host-head" data-wid="${escapeHtml(wid)}">
+                    <i class="fa-solid fa-chevron-down" style="font-size:.72rem;color:#6b7280;transition:transform .2s;${caret}"></i>
+                    <span class="fw-semibold">${escapeHtml(hostDisplayName(wid))}</span>
+                    <span class="badge bg-secondary" style="font-size:.72rem">${depCount} deployment${depCount > 1 ? 's' : ''}</span>
+                    <span class="badge bg-light text-secondary border" style="font-size:.72rem">${healthy}/${hostInstances.length} instances running</span>
+                    <button class="btn btn-outline-danger btn-sm ms-auto" data-stop-host="${escapeHtml(epKey)}" title="이 호스트의 모든 인스턴스 종료">
+                        <i class="fa-solid fa-stop me-1"></i>Stop all on host
+                    </button>
+                </div>
+                <div class="dep-host-body" style="${body}">
+                    <table class="table table-sm inst-table mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="small text-muted fw-semibold">모델 / Served name</th>
+                                <th class="small text-muted fw-semibold d-none d-md-table-cell">엔진</th>
+                                <th class="small text-muted fw-semibold">상태</th>
+                                <th class="small text-muted fw-semibold">GPU</th>
+                                <th class="small text-muted fw-semibold text-end">액션</th>
+                            </tr>
+                        </thead>
+                        <tbody>${groups}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    }).join('');
 
-        // Flatten instances to GPU level, tag each with its worker (endpoint)
-        const instances = [];
-        deps.forEach(dep => {
-            const isMultiReplica = (dep.deployment_type || '').toLowerCase() === 'replicas' && (dep.gpus || []).length > 1;
-            if (isMultiReplica) {
-                (dep.gpus || []).forEach(gpu => {
-                    const lastDash = gpu.lastIndexOf('-');
-                    const wid = lastDash >= 0 ? gpu.substring(0, lastDash) : gpu;
-                    instances.push({ dep, gpu, wid, multi: true });
-                });
-            } else {
-                const firstGpu = (dep.gpus || [])[0] || '';
-                const lastDash = firstGpu.lastIndexOf('-');
-                const wid = lastDash >= 0 ? firstGpu.substring(0, lastDash) : firstGpu;
-                instances.push({ dep, gpu: firstGpu, wid, multi: false });
-            }
+    container.querySelectorAll('.dep-host-head').forEach(el => {
+        el.addEventListener('click', (e) => {
+            if (e.target.closest('button')) return;
+            toggleHostGroup(el.dataset.wid);
         });
-        instances.sort((a, b) => a.wid.localeCompare(b.wid));
-
-        // Group by endpoint
-        const endpointMap = new Map();
-        instances.forEach(inst => {
-            if (!endpointMap.has(inst.wid)) endpointMap.set(inst.wid, []);
-            endpointMap.get(inst.wid).push(inst);
-        });
-
-        // Render: one section per endpoint
-        endpointMap.forEach((epInsts, wid) => {
-            const epKey = `${gid}_${wid}`.replace(/[^a-zA-Z0-9_]/g, '_');
-            _endpointActions.set(epKey, epInsts);
-
-            // Endpoint separator row with Stop All button
-            list.innerHTML += `
-                <tr class="${gid}-row ep-${epKey}" style="${rowDisplay}">
-                    <td colspan="6" style="padding:.25rem .5rem .25rem 2rem;background:#f8fafc;border-top:1px solid #e2e8f0">
-                        <div style="display:flex;align-items:center;justify-content:space-between">
-                            <span style="font-size:.75rem;font-weight:700;color:#94a3b8;letter-spacing:.06em;text-transform:uppercase">${escapeHtml(wid)}</span>
-                            <button onclick="stopEndpoint('${epKey}',this)" class="btn btn-outline-danger" style="font-size:.72rem;padding:.1rem .45rem;line-height:1.5" title="이 endpoint의 모든 replica 종료">
-                                <i class="fa-solid fa-stop me-1"></i>Stop All
-                            </button>
-                        </div>
-                    </td>
-                </tr>
-            `;
-
-            // Individual instance rows
-            epInsts.forEach(({ dep, gpu, multi }) => {
-                const dtype = (dep.deployment_type || '').toUpperCase();
-                const engine = (dep.engine || 'vllm').toUpperCase();
-                const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
-                const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark'
-                    : engine === 'DYNAMO' ? 'bg-success' : 'bg-dark';
-                // Worker container names are `<engine>_<deployId>_<worker>_<gpu>` (see
-                // worker/manager.py); the prefix must follow the engine or dynamo/ollama
-                // nodes never match and show as "Starting" with no logs.
-                const enginePrefix = engine === 'DYNAMO' ? 'dynamo' : engine === 'OLLAMA' ? 'ollama' : 'vllm';
-
-                if (multi) {
-                    const lastDash = gpu.lastIndexOf('-');
-                    const gpuWid = gpu.substring(0, lastDash);
-                    const gpuGid = gpu.substring(lastDash + 1);
-                    const containerName = `${enginePrefix}_${dep.id}_${gpuWid}_${gpuGid}`;
-                    const node = (dep.nodes || []).find(n => n.name === containerName);
-                    const isRunning = node ? !!node.is_healthy : false;
-                    const statusDot = isRunning
-                        ? `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#22c55e;display:inline-block"></span><span class="small">Running</span></span>`
-                        : `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block"></span><span class="small text-muted">Starting</span></span>`;
-                    const isStopping = _stopping.has(`${dep.id}:${gpu}`);
-                    const rowStyle = (rowDisplay || '') + (isStopping ? ';opacity:.3;pointer-events:none' : '');
-                    const stopBtn = isStopping
-                        ? `<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>`
-                        : `<button onclick="stopReplica('${escapeHtml(dep.id)}','${escapeHtml(gpu)}',this)" class="btn btn-sm btn-outline-danger" title="Stop this replica"><i class="fa-solid fa-stop"></i></button>`;
-                    list.innerHTML += `
-                        <tr class="${gid}-row ep-${epKey}" style="${rowStyle}">
-                            <td style="padding-left:3rem">
-                                <div class="fw-semibold small">${escapeHtml(dep.name)}</div>
-                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${escapeHtml(dep.id)}</div>
-                            </td>
-                            <td>
-                                <div class="small text-truncate" style="max-width:200px" title="${escapeHtml(dep.model)}">${escapeHtml(dep.model)}</div>
-                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${escapeHtml(dep.served_model_name)}">↳ ${escapeHtml(dep.served_model_name)}</div>` : ''}
-                            </td>
-                            <td class="text-nowrap">
-                                <span class="badge ${engineColor} me-1">${engine}</span>
-                                <span class="badge ${dtypeColor}">${dtype}</span>
-                            </td>
-                            <td>${statusDot}</td>
-                            <td><span class="badge bg-light text-secondary border" style="font-size:.8rem">${escapeHtml(gpu)}</span></td>
-                            <td class="text-end text-nowrap">
-                                <button onclick="viewLogs('${escapeHtml(dep.id)}','${escapeHtml(containerName)}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
-                                ${stopBtn}
-                            </td>
-                        </tr>
-                    `;
-                } else {
-                    const singleNode = (dep.nodes || [])[0];
-                    const isRunning = singleNode ? !!singleNode.is_healthy : false;
-                    const statusDot = isRunning
-                        ? `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#22c55e;display:inline-block"></span><span class="small">Running</span></span>`
-                        : `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block"></span><span class="small text-muted">Starting</span></span>`;
-                    const isStopping = _stopping.has(dep.id);
-                    const rowStyle = (rowDisplay || '') + (isStopping ? ';opacity:.3;pointer-events:none' : '');
-                    const stopBtn = isStopping
-                        ? `<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>`
-                        : `<button onclick="stopDeployment('${escapeHtml(dep.id)}',this)" class="btn btn-sm btn-outline-danger" title="Stop"><i class="fa-solid fa-stop"></i></button>`;
-                    const gpuList = (dep.gpus || []).map(g => `<span class="badge bg-light text-secondary border me-1" style="font-size:.8rem">${escapeHtml(g)}</span>`).join('');
-                    list.innerHTML += `
-                        <tr class="${gid}-row ep-${epKey}" style="${rowStyle}">
-                            <td style="padding-left:3rem">
-                                <div class="fw-semibold small">${escapeHtml(dep.name)}</div>
-                                <div class="font-monospace" style="font-size:.8rem;color:#9ca3af">${escapeHtml(dep.id)}</div>
-                            </td>
-                            <td>
-                                <div class="small text-truncate" style="max-width:200px" title="${escapeHtml(dep.model)}">${escapeHtml(dep.model)}</div>
-                                ${dep.served_model_name && dep.served_model_name !== dep.model ? `<div class="small text-truncate" style="max-width:200px;color:#94a3b8" title="${escapeHtml(dep.served_model_name)}">↳ ${escapeHtml(dep.served_model_name)}</div>` : ''}
-                            </td>
-                            <td class="text-nowrap">
-                                <span class="badge ${engineColor} me-1">${engine}</span>
-                                <span class="badge ${dtypeColor}">${dtype}</span>
-                            </td>
-                            <td>${statusDot}</td>
-                            <td><div class="d-flex flex-wrap gap-1">${gpuList}</div></td>
-                            <td class="text-end text-nowrap">
-                                <button onclick="viewLogs('${escapeHtml(dep.id)}')" class="btn btn-sm btn-outline-secondary me-1" title="Logs"><i class="fa-solid fa-terminal"></i></button>
-                                ${stopBtn}
-                            </td>
-                        </tr>
-                    `;
-                }
-            });
-        });
+    });
+    container.querySelectorAll('button[data-stop-host]').forEach(btn => {
+        btn.addEventListener('click', () => stopEndpoint(btn.dataset.stopHost, btn));
     });
 }
 
+// Instance health comes from the deployment node whose container name matches
+// this instance (`<engine>_<deployId>_<worker>_<gpu>`); single-container
+// deployments (TP, single replica) use the deployment's only node.
+function instanceContainerName(inst) {
+    if (!inst.multi) {
+        const node = (inst.dep.nodes || [])[0];
+        return node ? node.name : null;
+    }
+    return `${enginePrefix(inst.dep.engine)}_${inst.dep.id}_${widOfGpu(inst.gpu)}_${gpuIndexOf(inst.gpu)}`;
+}
+function instanceHealthy(inst) {
+    const nodes = inst.dep.nodes || [];
+    if (!inst.multi) return nodes.length > 0 ? !!nodes[0].is_healthy : false;
+    const name = instanceContainerName(inst);
+    const node = nodes.find(n => n.name === name);
+    return node ? !!node.is_healthy : false;
+}
+
+function renderDeploymentGroup(list) {
+    const dep = list[0].dep;
+    const dtype = (dep.deployment_type || '').toUpperCase();
+    const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
+    const depStopping = _stopping.has(dep.id);
+
+    const meta = [];
+    if (dep.max_len) meta.push(`max_len ${escapeHtml(dep.max_len)}`);
+    if (dep.gpu_util) meta.push(`gpu_util ${escapeHtml(dep.gpu_util)}`);
+    if (dep.block_size) meta.push(`block ${escapeHtml(dep.block_size)}`);
+    if (dep.reasoning_parser) meta.push(`reasoning ${escapeHtml(dep.reasoning_parser)}`);
+    if (dep.tool_call_parser) meta.push(`tools ${escapeHtml(dep.tool_call_parser)}`);
+    if (dep.image) meta.push(escapeHtml(dep.image));
+
+    const depStopBtn = depStopping
+        ? '<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>'
+        : `<button class="btn btn-sm btn-outline-danger" data-stop-dep="${escapeHtml(dep.id)}"
+               title="배포 전체 종료 (모든 호스트)"><i class="fa-solid fa-stop me-1"></i>Stop deployment</button>`;
+
+    const head = `
+        <tr class="dep-head-row">
+            <td colspan="5">
+                <div class="dep-head">
+                    <span class="fw-semibold">${escapeHtml(dep.name)}</span>
+                    <span class="font-monospace text-muted" style="font-size:.78rem">${escapeHtml(dep.id)}</span>
+                    ${engineBadge(dep.engine)}
+                    <span class="badge ${dtypeColor}">${escapeHtml(dtype || 'REPLICAS')}</span>
+                    ${dep.is_embedding ? '<span class="badge bg-info text-dark">EMBEDDING</span>' : ''}
+                    <span class="ms-auto">${depStopBtn}</span>
+                </div>
+                ${meta.length ? `<div class="dep-head-meta font-monospace">${meta.join(' · ')}</div>` : ''}
+            </td>
+        </tr>`;
+
+    const rows = list.map(inst => {
+        const dep2 = inst.dep;
+        const running = instanceHealthy(inst);
+        const container = instanceContainerName(inst);
+        const stopKey = inst.multi ? `${dep2.id}:${inst.gpu}` : dep2.id;
+        const stopping = _stopping.has(stopKey);
+        const rowStyle = stopping ? 'opacity:.3;pointer-events:none' : '';
+        const stopBtn = stopping
+            ? '<button class="btn btn-sm btn-outline-danger" disabled><i class="fa-solid fa-spinner fa-spin"></i></button>'
+            : inst.multi
+                ? `<button class="btn btn-sm btn-outline-danger" data-stop-gpu="${escapeHtml(dep2.id)}" data-gpu="${escapeHtml(inst.gpu)}" title="이 GPU의 인스턴스만 종료"><i class="fa-solid fa-stop"></i></button>`
+                : `<button class="btn btn-sm btn-outline-danger" data-stop-dep="${escapeHtml(dep2.id)}" title="이 인스턴스(=배포) 종료"><i class="fa-solid fa-stop"></i></button>`;
+        const served = dep2.served_model_name || dep2.model;
+        const gpuBadges = (inst.gpus || []).map(g =>
+            `<span class="badge bg-light text-secondary border me-1" style="font-size:.78rem">GPU ${escapeHtml(gpuIndexOf(g))}</span>`).join('');
+
+        return `
+            <tr class="ep-${escapeHtml(hostKeyOf(inst.wid))}" style="${rowStyle}">
+                <td>
+                    <div class="small text-break" title="${escapeHtml(dep2.model)}">${escapeHtml(dep2.model)}</div>
+                    <div class="small text-break" style="color:#94a3b8" title="${escapeHtml(served)}">↳ ${escapeHtml(served)}</div>
+                </td>
+                <td class="d-none d-md-table-cell">${engineBadge(dep2.engine)}</td>
+                <td>${statusDot(running)}</td>
+                <td>${gpuBadges || '<span class="text-muted">—</span>'}</td>
+                <td class="text-end text-nowrap">
+                    <button class="btn btn-sm btn-outline-secondary me-1" data-logs-dep="${escapeHtml(dep2.id)}"
+                        data-container="${escapeHtml(container || '')}" title="Logs"><i class="fa-solid fa-terminal"></i></button>
+                    ${stopBtn}
+                </td>
+            </tr>`;
+    }).join('');
+
+    return head + rows;
+}
+
+window.toggleHostGroup = function (wid) {
+    if (hostGroupCollapsed.has(wid)) hostGroupCollapsed.delete(wid);
+    else hostGroupCollapsed.add(wid);
+    renderDeployments();
+};
+
+// Delegated actions for the deployment list (rebuilt on every poll, so no
+// per-row listeners are kept around).
+document.addEventListener('click', (e) => {
+    const logsBtn = e.target.closest && e.target.closest('button[data-logs-dep]');
+    if (logsBtn) {
+        viewLogs(logsBtn.dataset.logsDep, logsBtn.dataset.container || undefined);
+        return;
+    }
+    const depBtn = e.target.closest && e.target.closest('button[data-stop-dep]');
+    if (depBtn) {
+        stopDeployment(depBtn.dataset.stopDep, depBtn);
+        return;
+    }
+    const gpuBtn = e.target.closest && e.target.closest('button[data-stop-gpu]');
+    if (gpuBtn) stopReplica(gpuBtn.dataset.stopGpu, gpuBtn.dataset.gpu, gpuBtn);
+});
 
 
-// ─── API Gateway ───────────────────────────────────────────────────────
-// Endpoint capability is inferred from model name (no /v1/models probe yet —
-// the router doesn't reliably expose `task` for every backend version). We use
-// a simple regex match against well-known embedding-model naming conventions.
+
+// ─── API page (Dynamo frontend) ────────────────────────────────────────
+// Models come from GET /api/frontend (the ids clients pass in the `model`
+// field). Capability is inferred from the model name — the frontend's
+// /v1/models does not expose a task per model.
 function gwEndpointKind(model) {
     const m = (model || '').toLowerCase();
     return /(embed|embedding|sentence-transformers|bge[-_]|e5[-_]|gte[-_])/.test(m)
         ? 'embedding' : 'chat';
 }
-let gwSelectedDeploymentName = null;
+let gwSelectedModelId = null;
 let gwExampleLang = 'curl';
 let gwTestAbort = null;
 
+// Frontend models, enriched with what central knows about the deployments
+// behind each served name (engine, replica health). Falls back to the
+// deployment list alone when /api/frontend is unavailable.
+function gwModels() {
+    const byServed = new Map();
+    (deployments || []).filter(d => d.status === 'running').forEach(d => {
+        const key = d.served_model_name || d.model;
+        if (!byServed.has(key)) byServed.set(key, []);
+        byServed.get(key).push(d);
+    });
+
+    const feModels = (frontendInfo && Array.isArray(frontendInfo.models)) ? frontendInfo.models : null;
+    const rows = (feModels || [...byServed.keys()].map(id => ({ id, instances: null, ready: null, namespace: null })))
+        .map(m => {
+            const deps = byServed.get(m.id) || [];
+            const nodes = deps.flatMap(d => d.nodes || []);
+            return {
+                id: m.id,
+                namespace: m.namespace ?? null,
+                ready: m.ready ?? null,
+                instances: m.instances ?? nodes.length,
+                healthy: nodes.filter(n => n.is_healthy).length,
+                total: nodes.length,
+                engine: deps.length ? (deps[0].engine || 'dynamo') : null,
+                kind: gwEndpointKind(m.id + ' ' + deps.map(d => d.model).join(' ')),
+            };
+        });
+    rows.sort((a, b) => a.id.localeCompare(b.id));
+    return rows;
+}
+
+// Legacy vLLM deployments never appear on the frontend — they serve their own
+// HTTPS endpoint. Listed separately so the page doesn't imply they are routed.
+function gwLegacyDeployments() {
+    const feIds = new Set(((frontendInfo && frontendInfo.models) || []).map(m => m.id));
+    return (deployments || []).filter(d =>
+        d.status === 'running' &&
+        String(d.engine || 'dynamo').toLowerCase() === 'vllm' &&
+        !feIds.has(d.served_model_name || d.model));
+}
+
 function renderGateway() {
-    const listEl = document.getElementById('gw-deployments-list');
+    const listEl = document.getElementById('gw-models-list');
     if (!listEl) return;
-    document.getElementById('gw-proxy-info').textContent = `Proxy at: ${window.location.hostname}:11434`;
-    const running = (deployments || []).filter(d => d.status === 'running');
-    if (running.length === 0) {
-        listEl.innerHTML = '<div class="text-muted small">No running deployments.</div>';
+
+    const baseEl = document.getElementById('gw-base-url');
+    if (baseEl) baseEl.textContent = `${frontendBaseUrl()}/v1`;
+    const stateEl = document.getElementById('gw-frontend-state');
+    if (stateEl) {
+        const fe = frontendInfo;
+        const ok = fe ? !!fe.healthy : false;
+        stateEl.className = 'badge ' + (!fe ? 'bg-secondary' : ok ? 'bg-success' : 'bg-danger');
+        stateEl.textContent = !fe ? 'frontend: unknown' : ok ? 'frontend: healthy' : 'frontend: unreachable';
+    }
+
+    const models = gwModels();
+    const legacy = gwLegacyDeployments();
+    if (models.length === 0) {
+        listEl.innerHTML = '<div class="text-muted small">No models are registered on the frontend.</div>'
+            + renderLegacyList(legacy);
         document.getElementById('gw-example-card').style.display = 'none';
         document.getElementById('gw-test-card').style.display = 'none';
         return;
     }
-    // Collapse to one entry per served_model_name — that's the value clients
-    // actually pass in the `model` field of the OpenAI-compatible request, and
-    // it's the same key the metrics page uses to filter. The internal config
-    // record's `.name` (e.g. "GPT-OSS 120B Config") can be shared across two
-    // different served names like "...-120b" and "...-120b-low", so grouping by
-    // it would hide the user-facing model id.
-    const byServed = new Map();
-    for (const d of running) {
-        const key = d.served_model_name || d.model;
-        if (!byServed.has(key)) {
-            byServed.set(key, {
-                name: key,
-                model: d.model,
-                configNames: new Set(),
-                kind: gwEndpointKind(d.model),
-                deployments: [],
-                nodeTotal: 0,
-                nodeHealthy: 0,
-            });
-        }
-        const g = byServed.get(key);
-        g.configNames.add(d.name);
-        g.deployments.push(d);
-        const nodes = d.nodes || [];
-        g.nodeTotal += nodes.length;
-        g.nodeHealthy += nodes.filter(n => n.is_healthy).length;
-    }
-    const aggregated = [...byServed.values()];
 
-    // Group by endpoint kind, larger group first.
     const groups = { chat: [], embedding: [] };
-    for (const g of aggregated) groups[g.kind].push(g);
+    for (const m of models) groups[m.kind].push(m);
     const groupMeta = {
-        chat:      { label: 'Chat completions', icon: 'fa-comments',     path: '/v1/chat/completions' },
+        chat:      { label: 'Chat completions', icon: 'fa-comments',      path: '/v1/chat/completions' },
         embedding: { label: 'Embeddings',       icon: 'fa-vector-square', path: '/v1/embeddings' },
     };
     const sections = Object.keys(groups)
@@ -609,14 +789,15 @@ function renderGateway() {
 
     listEl.innerHTML = sections.map(kind => {
         const meta = groupMeta[kind];
-        const rows = groups[kind].map(g => {
-            const sel = g.name === gwSelectedDeploymentName ? 'selected' : '';
-            const configLabel = [...g.configNames].join(', ');
-            return `<div class="gw-deploy-row ${sel}" data-name="${encodeURIComponent(g.name)}" onclick="gwSelectDeployment(decodeURIComponent(this.dataset.name))">
-                <div class="gw-deploy-name">${escapeHtml(g.name)}</div>
+        const rows = groups[kind].map(m => {
+            const sel = m.id === gwSelectedModelId ? 'selected' : '';
+            const unhealthy = m.total > 0 && m.healthy < m.total;
+            const health = m.total > 0 ? `${m.healthy}/${m.total}` : `${fmtNum(m.instances)}`;
+            return `<div class="gw-deploy-row ${sel}" data-name="${encodeURIComponent(m.id)}" onclick="gwSelectModel(decodeURIComponent(this.dataset.name))">
+                <div class="gw-deploy-name">${escapeHtml(m.id)}</div>
                 <div class="gw-deploy-meta">
-                    <span title="${escapeHtml(configLabel)}">${escapeHtml(configLabel)}</span>
-                    <span><span class="gw-deploy-status ${g.nodeHealthy < g.nodeTotal ? 'unhealthy' : ''}"></span>${g.nodeHealthy}/${g.nodeTotal}</span>
+                    <span title="${escapeHtml(m.namespace || '')}">${escapeHtml(m.namespace || '—')}</span>
+                    <span><span class="gw-deploy-status ${unhealthy ? 'unhealthy' : ''}"></span>${escapeHtml(health)} instances</span>
                 </div>
             </div>`;
         }).join('');
@@ -628,25 +809,47 @@ function renderGateway() {
             </div>
             ${rows}
         </div>`;
-    }).join('');
+    }).join('') + renderLegacyList(legacy);
 
-    // Auto-select first if nothing valid is selected.
-    if (!gwSelectedDeploymentName || !aggregated.some(g => g.name === gwSelectedDeploymentName)) {
-        gwSelectDeployment(aggregated[0].name);
+    if (!gwSelectedModelId || !models.some(m => m.id === gwSelectedModelId)) {
+        gwSelectModel(models[0].id);
     } else {
         gwRefreshExample();
     }
 }
 
-window.gwSelectDeployment = function (name) {
-    gwSelectedDeploymentName = name;
+function renderLegacyList(legacy) {
+    if (!legacy || legacy.length === 0) return '';
+    const rows = legacy.map(d => {
+        const served = d.served_model_name || d.model;
+        const nodes = d.nodes || [];
+        const urls = nodes.map(n => `${n.host}:${n.port}`).join(', ');
+        return `<div class="gw-deploy-row" style="cursor:default;opacity:.85">
+            <div class="gw-deploy-name">${escapeHtml(served)}</div>
+            <div class="gw-deploy-meta"><span title="${escapeHtml(urls)}">${escapeHtml(urls || '—')}</span></div>
+        </div>`;
+    }).join('');
+    return `<div class="gw-deploy-group">
+        <div class="gw-group-head">
+            <i class="fa-solid fa-triangle-exclamation"></i><span>Legacy (vllm)</span>
+            <span class="badge bg-light text-secondary border">direct endpoint — no gateway</span>
+            <span class="ms-auto text-muted">${legacy.length}</span>
+        </div>
+        ${rows}
+    </div>`;
+}
+
+window.gwSelectModel = function (id) {
+    gwSelectedModelId = id;
     document.querySelectorAll('.gw-deploy-row').forEach(el => {
-        el.classList.toggle('selected', decodeURIComponent(el.dataset.name || '') === name);
+        el.classList.toggle('selected', decodeURIComponent(el.dataset.name || '') === id);
     });
     document.getElementById('gw-example-card').style.display = 'block';
     document.getElementById('gw-test-card').style.display = 'block';
     gwRefreshExample();
 }
+// Backwards-compatible alias (older markup/bookmarks call this name).
+window.gwSelectDeployment = window.gwSelectModel;
 
 window.gwSelectExampleTab = function (lang) {
     gwExampleLang = lang;
@@ -654,16 +857,6 @@ window.gwSelectExampleTab = function (lang) {
         b.classList.toggle('active', b.dataset.lang === lang);
     });
     gwRefreshExample();
-}
-
-function gwSelectedDeployment() {
-    // gwSelectedDeploymentName is a served_model_name (the value clients pass in
-    // the `model` request field). Any running deployment with that served name
-    // will do — the router load-balances across all replicas. Used purely as a
-    // source of the upstream model id for the example/test request body.
-    return (deployments || []).find(
-        d => (d.served_model_name || d.model) === gwSelectedDeploymentName && d.status === 'running'
-    );
 }
 
 // Default prompts that match the endpoint kind. Each user edit is preserved
@@ -676,15 +869,12 @@ const gwPromptCache = { chat: null, embedding: null };
 let gwLastKind = null;
 
 function gwRefreshExample() {
-    const d = gwSelectedDeployment();
-    if (!d) return;
-    const kind = gwEndpointKind(d.model);
-    const host = window.location.hostname;
-    const base = `http://${host}:11434`;
+    const model = gwSelectedModelId;
+    if (!model) return;
+    const kind = gwEndpointKind(model);
+    const base = frontendBaseUrl();
     const code = document.getElementById('gw-example-code');
-    // `model` in the request body is the served_model_name — that's what the
-    // router and vLLM workers use to route, NOT the underlying model file id.
-    const model = d.served_model_name || d.model;
+    if (!code) return;
 
     // Swap the prompt textarea to a kind-appropriate default the first time we
     // visit each kind. If the user has typed something, that edit is captured
@@ -704,7 +894,6 @@ function gwRefreshExample() {
         if (kind === 'embedding') {
             code.textContent = `curl -X POST ${base}/v1/embeddings \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "model": "${model}",
     "input": "${examplePrompt}"
@@ -712,7 +901,6 @@ function gwRefreshExample() {
         } else {
             code.textContent = `curl -X POST ${base}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "model": "${model}",
     "messages": [
@@ -726,7 +914,7 @@ function gwRefreshExample() {
 
 client = OpenAI(
     base_url="${base}/v1",
-    api_key="YOUR_API_KEY",
+    api_key="EMPTY",
 )
 
 resp = client.embeddings.create(
@@ -739,7 +927,7 @@ print(resp.data[0].embedding[:8], "...")`;
 
 client = OpenAI(
     base_url="${base}/v1",
-    api_key="YOUR_API_KEY",
+    api_key="EMPTY",
 )
 
 resp = client.chat.completions.create(
@@ -751,7 +939,8 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)`;
         }
     }
-    document.getElementById('gw-test-model').textContent = model;
+    const modelEl = document.getElementById('gw-test-model');
+    if (modelEl) modelEl.textContent = model;
 }
 
 window.gwCopyExample = function () {
@@ -765,10 +954,11 @@ window.gwCopyExample = function () {
     });
 }
 
+// In-browser load test, pointed at the Dynamo frontend.
 window.gwRunTest = async function () {
-    const d = gwSelectedDeployment();
-    if (!d) return;
-    const kind = gwEndpointKind(d.model);
+    const modelId = gwSelectedModelId;
+    if (!modelId) return;
+    const kind = gwEndpointKind(modelId);
     const input = document.getElementById('gw-test-input').value;
     const total = Math.max(1, parseInt(document.getElementById('gw-test-total').value, 10) || 1);
     const concurrency = Math.max(1, Math.min(total, parseInt(document.getElementById('gw-test-concurrency').value, 10) || 1));
@@ -799,8 +989,7 @@ window.gwRunTest = async function () {
     const abortController = new AbortController();
     gwTestAbort = abortController;
 
-    const url = `http://${window.location.hostname}:11434${kind === 'embedding' ? '/v1/embeddings' : '/v1/chat/completions'}`;
-    const modelId = d.served_model_name || d.model;
+    const url = `${frontendBaseUrl()}${kind === 'embedding' ? '/v1/embeddings' : '/v1/chat/completions'}`;
     const buildPayload = () => kind === 'embedding'
         ? { model: modelId, input }
         : { model: modelId, messages: [{ role: 'user', content: input }] };
@@ -917,22 +1106,32 @@ function renderConfigs() {
 
     const rows = savedConfigs.map(conf => {
         const dtype = (conf.deployment_type || conf.mode || 'replicas').toUpperCase();
-        const engine = (conf.engine || 'vllm').toUpperCase();
         const dtypeColor = dtype === 'TP' ? 'bg-primary' : 'bg-secondary';
-        const engineColor = engine === 'OLLAMA' ? 'bg-warning text-dark' : 'bg-dark';
-        const imageTag = conf.vllm_image
-            ? `<div class="font-monospace text-muted text-truncate mt-1" style="font-size:.78rem;max-width:320px" title="${escapeHtml(conf.vllm_image)}"><i class="fa-brands fa-docker me-1"></i>${escapeHtml(conf.vllm_image)}</div>`
+        // `image` is the contract field; `vllm_image` is what older saved
+        // configs used, so both are accepted when reading one back.
+        const image = conf.image || conf.vllm_image;
+        const imageTag = image
+            ? `<div class="font-monospace text-muted text-break mt-1" style="font-size:.78rem" title="${escapeHtml(image)}"><i class="fa-brands fa-docker me-1"></i>${escapeHtml(image)}</div>`
+            : '';
+        const extras = [];
+        if (conf.served_model_name) extras.push(`served: ${escapeHtml(conf.served_model_name)}`);
+        if (conf.reasoning_parser) extras.push(`reasoning: ${escapeHtml(conf.reasoning_parser)}`);
+        if (conf.tool_call_parser) extras.push(`tools: ${escapeHtml(conf.tool_call_parser)}`);
+        const extraTag = extras.length
+            ? `<div class="text-muted text-break mt-1" style="font-size:.78rem">${extras.join(' · ')}</div>`
             : '';
         return `
             <tr class="config-row">
                 <td>
                     <div class="fw-semibold small">${escapeHtml(conf.name)}</div>
-                    <div class="font-monospace text-muted text-truncate" style="font-size:.82rem;max-width:320px" title="${escapeHtml(conf.model)}">${escapeHtml(conf.model)}</div>
+                    <div class="font-monospace text-muted text-break" style="font-size:.82rem" title="${escapeHtml(conf.model)}">${escapeHtml(conf.model)}</div>
                     ${imageTag}
+                    ${extraTag}
                 </td>
                 <td class="text-nowrap">
                     <span class="badge ${dtypeColor} me-1">${dtype}</span>
-                    <span class="badge ${engineColor}">${engine}</span>
+                    ${engineBadge(conf.engine)}
+                    ${conf.is_embedding ? '<span class="badge bg-info text-dark ms-1">EMBEDDING</span>' : ''}
                 </td>
                 <td class="text-end text-nowrap">
                     <button class="btn btn-sm btn-outline-danger me-1" onclick="deleteConfig('${conf.name}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
@@ -1057,9 +1256,9 @@ function renderEndpoints() {
         }
     });
 
-    if (!hasPending) pendingList.innerHTML = '<div class="col-12 text-muted">등록 대기 중인 노드가 없습니다.</div>';
+    if (!hasPending) pendingList.innerHTML = '<div class="col-12 text-muted">등록 대기 중인 호스트가 없습니다.</div>';
     if (!hasActive) {
-        activeList.innerHTML = '<p class="text-muted p-3 mb-0">활성화된 엔드포인트가 없습니다.</p>';
+        activeList.innerHTML = '<p class="text-muted p-3 mb-0">활성화된 호스트가 없습니다.</p>';
     } else {
         activeList.innerHTML = activeRows.join('');
     }
@@ -1227,7 +1426,7 @@ async function renderImagePanelBody(wid, bodyEl) {
                 bodyEl.innerHTML = `
                     <div class="text-warning small py-2">
                         <i class="fa-solid fa-triangle-exclamation me-1"></i>
-                        이 워커는 이미지 관리를 지원하지 않습니다. 워커 코드를 업데이트하세요.
+                        이 호스트의 워커 에이전트가 이미지 관리를 지원하지 않습니다. 워커를 업데이트하세요.
                     </div>`;
                 return;
             } else {
@@ -1241,36 +1440,29 @@ async function renderImagePanelBody(wid, bodyEl) {
     const images = epImages.get(wid) || [];
     const safeWid = escapeHtml(wid);
 
-    const imageRows = images.length > 0
-        ? images.map(img => {
-            const safeName = escapeHtml(img.name);
-            return `
-                <div class="d-flex align-items-center justify-content-between py-1" style="border-bottom:1px solid #f1f5f9">
-                    <div>
-                        <span class="font-monospace small fw-semibold">${safeName}</span>
-                        <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(img.size || '')}</span>
-                    </div>
-                    <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
-                        data-wid="${safeWid}" data-image="${safeName}"
-                        onclick="pullImageFromBtn(this)">
-                        <i class="fa-solid fa-arrow-rotate-right me-1"></i>Update
-                    </button>
-                </div>`;
-        }).join('')
-        : '<div class="text-muted small py-1">No vLLM images found on this worker.</div>';
+    const imageRows = _renderImageRows(images, safeWid);
 
     bodyEl.innerHTML = `
         <div class="mb-2" style="font-size:.8rem;font-weight:600;color:#374151;margin-top:.25rem">
-            <i class="fa-brands fa-docker me-1"></i>Pulled vLLM Images
+            <i class="fa-brands fa-docker me-1"></i>Pulled engine images
         </div>
         <div class="mb-3" id="img-list-${safeWid}">${imageRows}</div>
-        <div style="font-size:.8rem;font-weight:600;color:#374151;margin-bottom:.4rem">Pull New Image</div>
+        <div style="font-size:.8rem;font-weight:600;color:#374151;margin-bottom:.4rem">Pull an image</div>
+        <div class="d-flex flex-wrap gap-1 mb-2">
+            <button class="btn btn-sm btn-outline-success" style="font-size:.72rem;padding:.1rem .45rem"
+                data-wid="${safeWid}" data-image="${escapeHtml(ENGINE_IMAGE.dynamo)}" onclick="fillPullImage(this)">
+                Dynamo engine image
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
+                data-wid="${safeWid}" data-image="${escapeHtml(ENGINE_IMAGE.vllm)}" onclick="fillPullImage(this)">
+                vLLM (legacy)
+            </button>
+        </div>
         <div class="input-group input-group-sm mb-2">
-            <span class="input-group-text font-monospace" style="font-size:.8rem">vllm/vllm-openai:</span>
-            <input type="text" class="form-control font-monospace" id="pull-tag-${safeWid}"
-                placeholder="latest" value="latest" style="font-size:.8rem">
+            <input type="text" class="form-control font-monospace" id="pull-image-${safeWid}"
+                placeholder="${escapeHtml(ENGINE_IMAGE.dynamo)}" value="${escapeHtml(ENGINE_IMAGE.dynamo)}" style="font-size:.8rem">
             <button class="btn btn-primary" id="pull-btn-${safeWid}" data-wid="${safeWid}"
-                onclick="pullImageFromTag(this.dataset.wid)">
+                onclick="pullImageFromInput(this.dataset.wid)">
                 <i class="fa-solid fa-download me-1"></i>Pull
             </button>
         </div>
@@ -1304,23 +1496,38 @@ async function refreshImageList(wid) {
     }
 
     const images = epImages.get(wid) || [];
-    listEl.innerHTML = images.length > 0
-        ? images.map(img => {
-            const safeName = escapeHtml(img.name);
-            return `
-                <div class="d-flex align-items-center justify-content-between py-1" style="border-bottom:1px solid #f1f5f9">
-                    <div>
-                        <span class="font-monospace small fw-semibold">${safeName}</span>
-                        <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(img.size || '')}</span>
-                    </div>
-                    <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
-                        data-wid="${safeWid}" data-image="${safeName}"
-                        onclick="pullImageFromBtn(this)">
-                        <i class="fa-solid fa-arrow-rotate-right me-1"></i>Update
-                    </button>
-                </div>`;
-        }).join('')
-        : '<div class="text-muted small py-1">No vLLM images found on this worker.</div>';
+    listEl.innerHTML = _renderImageRows(images, safeWid);
+}
+
+// Image list rows. The Dynamo runtime image is what `engine=dynamo` instances
+// run, so it is called out as the engine image; vllm/vllm-openai is legacy.
+function _renderImageRows(images, safeWid) {
+    if (!images || images.length === 0) {
+        return '<div class="text-muted small py-1">No engine images found on this host.</div>';
+    }
+    return images.map(img => {
+        const safeName = escapeHtml(img.name);
+        const name = String(img.name || '');
+        let tag = '';
+        if (name.startsWith('nvcr.io/nvidia/ai-dynamo/vllm-runtime')) {
+            tag = '<span class="badge bg-success ms-2" style="font-size:.66rem">ENGINE IMAGE (DYNAMO)</span>';
+        } else if (name.startsWith('vllm/vllm-openai')) {
+            tag = '<span class="badge bg-secondary ms-2" style="font-size:.66rem">LEGACY (VLLM)</span>';
+        }
+        return `
+            <div class="d-flex align-items-center justify-content-between gap-2 py-1 flex-wrap" style="border-bottom:1px solid #f1f5f9">
+                <div class="text-break">
+                    <span class="font-monospace small fw-semibold">${safeName}</span>
+                    <span class="text-muted ms-2" style="font-size:.78rem">${escapeHtml(img.size || '')}</span>
+                    ${tag}
+                </div>
+                <button class="btn btn-sm btn-outline-secondary" style="font-size:.72rem;padding:.1rem .45rem"
+                    data-wid="${safeWid}" data-image="${safeName}"
+                    onclick="pullImageFromBtn(this)">
+                    <i class="fa-solid fa-arrow-rotate-right me-1"></i>Update
+                </button>
+            </div>`;
+    }).join('');
 }
 
 window.clearPullOutput = function(wid) {
@@ -1339,7 +1546,7 @@ async function renderModelPanelBody(wid, bodyEl) {
             if (resp.ok) {
                 epModels.set(wid, await resp.json());
             } else if (resp.status === 501) {
-                bodyEl.innerHTML = `<div class="text-warning small py-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>이 워커는 모델 관리를 지원하지 않습니다. 워커 코드를 업데이트하세요.</div>`;
+                bodyEl.innerHTML = `<div class="text-warning small py-2"><i class="fa-solid fa-triangle-exclamation me-1"></i>이 호스트의 워커 에이전트가 모델 관리를 지원하지 않습니다. 워커를 업데이트하세요.</div>`;
                 return;
             } else {
                 epModels.set(wid, []);
@@ -1405,7 +1612,7 @@ async function refreshModelList(wid) {
 
 function _renderModelRows(models, safeWid) {
     if (!models || models.length === 0) {
-        return '<div class="text-muted small py-1">No HuggingFace models cached on this worker.</div>';
+        return '<div class="text-muted small py-1">No HuggingFace models cached on this host.</div>';
     }
     return models.map(m => {
         const safeId = escapeHtml(m.repo_id);
@@ -1558,10 +1765,15 @@ window.pullImageFromBtn = async function(btn) {
     await _doPullImage(wid, image);
 };
 
-window.pullImageFromTag = async function(wid) {
-    const tagEl = document.getElementById(`pull-tag-${wid}`);
-    const tag = (tagEl?.value.trim()) || 'latest';
-    await _doPullImage(wid, `vllm/vllm-openai:${tag}`);
+window.fillPullImage = function(btn) {
+    const input = document.getElementById(`pull-image-${btn.dataset.wid}`);
+    if (input) input.value = btn.dataset.image;
+};
+
+window.pullImageFromInput = async function(wid) {
+    const el = document.getElementById(`pull-image-${wid}`);
+    const image = (el?.value.trim()) || ENGINE_IMAGE.dynamo;
+    await _doPullImage(wid, image);
 };
 
 async function _doPullImage(wid, image) {
@@ -1605,9 +1817,11 @@ async function _doPullImage(wid, image) {
     }
 }
 
+// Suggestions for the (optional) image override: every image already pulled on
+// an active host, plus the two defaults.
 async function fetchAllWorkerImages() {
     const activeWorkers = Object.values(endpoints).filter(ep => ep.status === 'active');
-    const allImages = new Set(['vllm/vllm-openai:latest']);
+    const allImages = new Set([ENGINE_IMAGE.dynamo, ENGINE_IMAGE.vllm]);
     await Promise.all(activeWorkers.map(async ep => {
         try {
             const resp = await fetch(`/api/endpoints/${ep.id}/images`);
@@ -1617,15 +1831,24 @@ async function fetchAllWorkerImages() {
             }
         } catch (e) {}
     }));
-    const datalist = document.getElementById('vllm-image-datalist');
+    const datalist = document.getElementById('deploy-image-datalist');
     if (datalist) datalist.innerHTML = [...allImages].map(n => `<option value="${escapeHtml(n)}">`).join('');
 }
 
 window.handleEngineChange = function() {
-    const engine = document.getElementById('deployEngine')?.value;
-    const section = document.getElementById('vllm-image-section');
-    if (section) section.style.display = engine === 'vllm' ? '' : 'none';
-    if (engine === 'vllm') fetchAllWorkerImages();
+    const engine = document.getElementById('deployEngine')?.value || 'dynamo';
+    const imgEl = document.getElementById('deployImage');
+    if (imgEl) imgEl.placeholder = ENGINE_IMAGE[engine] || ENGINE_IMAGE.dynamo;
+    // The legacy vLLM engine serves its own endpoint and is not routed by the
+    // Dynamo frontend — say so instead of silently deploying something the API
+    // page won't list.
+    document.querySelectorAll('.deploy-legacy-warning').forEach(el => {
+        el.style.display = engine === 'vllm' ? '' : 'none';
+    });
+    document.querySelectorAll('.deploy-dynamo-only').forEach(el => {
+        el.style.display = engine === 'dynamo' ? '' : 'none';
+    });
+    fetchAllWorkerImages();
 };
 
 async function acceptEndpoint(id) {
@@ -1641,10 +1864,10 @@ async function acceptEndpoint(id) {
             body: JSON.stringify({ custom_name: id })
         });
         if (res.ok) {
-            showAlert("success", `Endpoint ${id} accepted successfully!`);
+            showAlert("success", `Host ${id} accepted successfully!`);
             fetchStatus();
         } else {
-            showAlert("danger", "Failed to accept endpoint");
+            showAlert("danger", "Failed to accept host");
             if (btn) {
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa-solid fa-check me-1"></i> Accept';
@@ -1679,7 +1902,7 @@ async function loadConfig(name) {
     document.getElementById('deployServedModel').value = conf.served_model_name || '';
 
     const engineEl = document.getElementById('deployEngine');
-    if (engineEl) engineEl.value = conf.engine || 'vllm';
+    if (engineEl) engineEl.value = conf.engine || 'dynamo';
 
     const dtype = conf.deployment_type || conf.mode || 'replicas';
     if (dtype === 'tp') {
@@ -1691,8 +1914,17 @@ async function loadConfig(name) {
     document.getElementById('deployMaxLen').value = conf.max_len || '';
     document.getElementById('deployGpuUtil').value = conf.gpu_util || 0.9;
     document.getElementById('deployExtraArgs').value = conf.extra_args || '';
-    const imgEl = document.getElementById('deployVllmImage');
-    if (imgEl) imgEl.value = conf.vllm_image || '';
+    // `image` is the contract field; `vllm_image` is what pre-Dynamo configs
+    // stored, so saved configs from either era round-trip.
+    const imgEl = document.getElementById('deployImage');
+    if (imgEl) imgEl.value = conf.image || conf.vllm_image || '';
+    const embedEl = document.getElementById('deployIsEmbedding');
+    if (embedEl) embedEl.checked = !!conf.is_embedding;
+    const reasonEl = document.getElementById('deployReasoningParser');
+    if (reasonEl) reasonEl.value = conf.reasoning_parser || '';
+    const toolEl = document.getElementById('deployToolCallParser');
+    if (toolEl) toolEl.value = conf.tool_call_parser || '';
+    if (typeof window.handleEngineChange === 'function') window.handleEngineChange();
 
     if (gpus.length === 0) await fetchStatus();
 
@@ -1720,19 +1952,24 @@ function getFormData() {
         return null;
     }
 
+    // POST /api/deploy body (docs/omniserve-ui-redesign.md, "API 계약").
     return {
         name: name,
         deployment_type: isTp ? "tp" : "replicas",
 
         model: document.getElementById('deployModel').value,
         served_model_name: document.getElementById('deployServedModel').value.trim() || null,
-        engine: document.getElementById('deployEngine') ? document.getElementById('deployEngine').value : 'vllm',
+        engine: document.getElementById('deployEngine')?.value || 'dynamo',
         gpus: gpus,
         tp: isTp ? gpus.length : 1,
         max_len: parseInt(document.getElementById('deployMaxLen').value) || null,
         gpu_util: parseFloat(document.getElementById('deployGpuUtil').value) || 0.9,
         extra_args: document.getElementById('deployExtraArgs').value.trim() || null,
-        vllm_image: document.getElementById('deployVllmImage')?.value.trim() || null
+        image: document.getElementById('deployImage')?.value.trim() || null,
+        is_embedding: !!document.getElementById('deployIsEmbedding')?.checked,
+        // Empty = inferred from the model name by the worker.
+        reasoning_parser: document.getElementById('deployReasoningParser')?.value.trim() || null,
+        tool_call_parser: document.getElementById('deployToolCallParser')?.value.trim() || null
     };
 }
 
@@ -1857,16 +2094,6 @@ window.stopReplica = async function(deployId, globalGpuId, btn) {
         _stopping.delete(key);
     }
 };
-
-window.toggleDepGroup = function(gid) {
-    const rows = document.querySelectorAll(`.${gid}-row`);
-    const icon = document.getElementById(`${gid}-icon`);
-    const isVisible = rows.length > 0 && rows[0].style.display !== 'none';
-    rows.forEach(r => { r.style.display = isVisible ? 'none' : ''; });
-    if (icon) icon.style.transform = isVisible ? 'rotate(-90deg)' : '';
-    if (isVisible) depGroupCollapsed.add(gid); else depGroupCollapsed.delete(gid);
-};
-
 
 window.stopEndpoint = async function(epKey, btn) {
     const actions = _endpointActions.get(epKey) || [];

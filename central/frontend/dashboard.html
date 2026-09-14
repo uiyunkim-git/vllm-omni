@@ -2,24 +2,15 @@
 
 {% block content %}
 
-<div class="section-title"><i class="fa-solid fa-network-wired me-1"></i>Active Deployments</div>
-<div class="mb-4">
-    <div class="card table-card">
-        <table class="table table-hover">
-            <thead class="table-light">
-                <tr>
-                    <th class="small text-muted fw-semibold">이름</th>
-                    <th class="small text-muted fw-semibold">모델</th>
-                    <th class="small text-muted fw-semibold">엔진 / 모드</th>
-                    <th class="small text-muted fw-semibold">상태</th>
-                    <th class="small text-muted fw-semibold">GPUs</th>
-                    <th class="small text-muted fw-semibold text-end">액션</th>
-                </tr>
-            </thead>
-            <tbody id="deployments-table-body"></tbody>
-        </table>
+<div class="section-title"><i class="fa-solid fa-tower-broadcast me-1"></i>Frontend (Dynamo)</div>
+<div class="card mb-4">
+    <div id="frontend-status">
+        <div class="p-3 text-muted mb-0">Loading frontend status…</div>
     </div>
 </div>
+
+<div class="section-title"><i class="fa-solid fa-network-wired me-1"></i>Deployments by host</div>
+<div class="mb-4" id="deployments-container"></div>
 
 <div class="section-title"><i class="fa-solid fa-microchip me-1"></i>GPU Status</div>
 <div class="mb-4" id="gpu-cards-container"></div>

@@ -3,7 +3,13 @@
 {% block content %}
 <div class="d-flex align-items-center mb-4">
     <i class="fa-solid fa-diagram-project me-2 text-secondary"></i>
-    <h4 class="fw-bold mb-0">Worker Node Endpoints</h4>
+    <div>
+        <h4 class="fw-bold mb-0">Hosts</h4>
+        <p class="text-muted small mb-0 mt-1">
+            워커 에이전트가 등록된 GPU 호스트. 인스턴스는 여기 pull 된 엔진 이미지
+            (<span class="font-monospace">nvcr.io/nvidia/ai-dynamo/vllm-runtime:*</span>)로 실행됩니다.
+        </p>
+    </div>
 </div>
 
 <!-- Pending Registration -->
@@ -19,7 +25,7 @@
 <!-- Active Endpoints -->
 <div class="mb-4">
     <div class="section-title">
-        <i class="fa-solid fa-circle-check me-1"></i>Active Endpoints
+        <i class="fa-solid fa-circle-check me-1"></i>Active Hosts
     </div>
     <div class="card table-card">
         <div id="active-endpoints-container">
