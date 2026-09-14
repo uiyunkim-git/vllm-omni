@@ -29,7 +29,7 @@ class WorkerDeployRequest(BaseModel):
     model: str
     served_model_name: Optional[str] = None
     is_embedding: bool = False
-    engine: Optional[str] = "vllm"
+    engine: Optional[str] = "dynamo"
     gpus: List[int]
     tp: int = 1
     max_len: Optional[int] = None

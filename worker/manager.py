@@ -47,6 +47,7 @@ HOST_PORT_OFFSET = 40000
 
 # Dynamo data plane (engine == "dynamo"): worker image and the etcd the frontend uses
 # for discovery. Central normally passes both explicitly in the deploy request.
+DEFAULT_ENGINE = os.environ.get("DEFAULT_ENGINE", "dynamo")
 DYNAMO_IMAGE = os.environ.get("DYNAMO_IMAGE", "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2")
 DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
 # Dynamo parses DYN_SYSTEM_PORT as i16 (max 32767), so the health/metrics port cannot use
@@ -69,6 +70,24 @@ class WorkerManager:
         # read-allocate-write of local_deployments.json and both pick the same
         # port — the second save silently dropping the first replica's record.
         self._state_lock = threading.Lock()
+        # Host firewall rules for dynamo instances are inserted at deploy time
+        # and do NOT survive a host reboot, so re-assert them for whatever this
+        # worker is already running.
+        try:
+            self.reapply_host_ports()
+        except Exception as e:
+            logger.warning(f"startup firewall re-apply skipped: {e}")
+
+    def reapply_host_ports(self) -> None:
+        ports = []
+        for dep in self.load_local_deployments():
+            if not (dep.get("nodes") and str(dep["nodes"][0].get("name", "")).startswith("dynamo_")):
+                continue
+            for p in dep.get("ports", []):
+                ports += [p + DYNAMO_SYSTEM_PORT_OFFSET, p + DYNAMO_RPC_PORT_OFFSET,
+                          p + DYNAMO_RESP_PORT_OFFSET, p + DYNAMO_KV_PORT_OFFSET]
+        if ports:
+            self._ensure_host_ports_open(ports)
 
     def get_gpu_status(self):
         try:
@@ -270,7 +289,9 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         deploy_id = req["deploy_id"]
         replica_id = req["replica_id"]
 
-        engine = req.get("engine", "vllm")
+        engine = req.get("engine", DEFAULT_ENGINE)
+        if engine not in ("dynamo", "vllm"):
+            raise Exception(f"Unsupported engine {engine!r} (use 'dynamo', or 'vllm' for a legacy direct endpoint)")
         # Check that the requested image exists locally before doing anything else
         default_image = DYNAMO_IMAGE if engine == "dynamo" else "vllm/vllm-openai:latest"
         requested_image = req.get("vllm_image") or default_image
@@ -310,15 +331,8 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
         used_ports.add(current_port)
         ports.append(current_port)
         
-        if engine == "ollama":
-            template = self.env.get_template("ollama_node.j2")
-            node_name = f"ollama_{replica_id}"
-        elif engine == "dynamo":
-            template = self.env.get_template("dynamo_node.j2")
-            node_name = f"dynamo_{replica_id}"
-        else:
-            template = self.env.get_template("vllm_node.j2")
-            node_name = f"vllm_{replica_id}"
+        template = self.env.get_template(f"{engine}_node.j2")
+        node_name = f"{engine}_{replica_id}"
         
         token = os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
         if not token:
@@ -340,17 +354,19 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
             
         os.makedirs(dep_dir, exist_ok=True)
                 
-        # Generate self-signed SSL certificate for DPI Evasion
-        try:
-            subprocess.run([
-                "openssl", "req", "-x509", "-newkey", "rsa:4096",
-                "-keyout", os.path.join(dep_dir, "vllm.key"),
-                "-out", os.path.join(dep_dir, "vllm.crt"),
-                "-days", "365", "-nodes", "-subj", "/CN=vllm_secure"
-            ], check=True, capture_output=True)
-            logger.info("Generated DPI-Evasion SSL Certificate successfully.")
-        except Exception as e:
-            logger.error(f"Failed to generate SSL certs: {e}")
+        # Self-signed cert for the legacy vLLM endpoint only — a dynamo worker
+        # exposes no HTTPS server (the frontend owns ingress).
+        if engine == "vllm":
+            try:
+                subprocess.run([
+                    "openssl", "req", "-x509", "-newkey", "rsa:4096",
+                    "-keyout", os.path.join(dep_dir, "vllm.key"),
+                    "-out", os.path.join(dep_dir, "vllm.crt"),
+                    "-days", "365", "-nodes", "-subj", "/CN=vllm_secure",
+                ], check=True, capture_output=True)
+                logger.info("Generated self-signed certificate for the legacy vLLM endpoint.")
+            except Exception as e:
+                logger.error(f"Failed to generate SSL certs: {e}")
 
         compose_path = os.path.join(dep_dir, "docker-compose.yml")
 
@@ -367,7 +383,6 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
                 gpu_memory_util=req.get("gpu_util"),
                 replica_id=replica_id,
                 host_cache_dir="/home/uiyunkim/.cache/huggingface",
-                host_data_dir="/home/uiyunkim/.ollama",
                 host_cert_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.crt"),
                 host_key_path=os.path.join(HOST_DATA_DIR, f"run_{replica_id}", "vllm.key"),
                 extra_args=shlex.split(req.get("extra_args") or ""),
@@ -419,8 +434,6 @@ printf '{{"commit":"%s","subtree":"%s","updated_at":"%s"}}\\n' "$NEWSHA" "$SUBTR
             cleanup_cmd = ["docker", "compose", "-p", f"vllm_{replica_id}", "-f", compose_path, "down", "-t", "0", "-v"]
             subprocess.run(cleanup_cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["docker", "rm", "-f", node_name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if engine == "ollama":
-                subprocess.run(["docker", "rm", "-f", f"{node_name}_proxy"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             shutil.rmtree(dep_dir, ignore_errors=True)
 
             details = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
@@ -836,8 +849,13 @@ print(f'\\n[✓] Done: {model_id}', flush=True)
             name = parts[0] if parts else ''
             size = parts[1] if len(parts) > 1 else ''
             created = parts[2] if len(parts) > 2 else ''
-            if name.startswith('vllm/'):
-                images.append({'name': name, 'size': size, 'created': created})
+            # Engine images only: the Dynamo runtime (data plane) and vLLM
+            # (legacy direct endpoints). Everything else on the host is noise.
+            if name.startswith('vllm/') or 'ai-dynamo/' in name:
+                images.append({
+                    'name': name, 'size': size, 'created': created,
+                    'engine': 'dynamo' if 'ai-dynamo/' in name else 'vllm',
+                })
         return images
 
     async def pull_image_stream(self, image: str):

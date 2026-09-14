@@ -182,6 +182,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./central/main.py:/app/main.py
       - ./central/manager.py:/app/manager.py
+      - ./central/dynamo.py:/app/dynamo.py
+      - ./central/db.py:/app/db.py
       - ./central/frontend/static:/app/frontend/static
       - ./central/frontend:/app/frontend
       - ./central/data:/app/data

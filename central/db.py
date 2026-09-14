@@ -53,6 +53,14 @@ def init_db():
         cursor.execute("ALTER TABLE deployments ADD COLUMN engine TEXT DEFAULT 'vllm'")
     except sqlite3.OperationalError:
         pass # Column already exists
+
+    # Engine/deploy settings (max_len, gpu_util, extra_args, parsers, image,
+    # is_embedding, block_size) so the UI can show what a deployment actually
+    # runs with and redeploy it without the operator retyping everything.
+    try:
+        cursor.execute("ALTER TABLE deployments ADD COLUMN config_json TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
     
     # Configs Table
     cursor.execute('''

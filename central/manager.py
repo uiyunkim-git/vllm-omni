@@ -8,6 +8,8 @@ import httpx
 import logging
 import asyncio
 from typing import List, Dict, Optional
+
+import dynamo
 import db
 
 DATA_DIR = "/app/data"
@@ -15,23 +17,16 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
-P2C_ROUTER_URL = os.environ.get("P2C_ROUTER_URL", "http://143.248.74.105:11434")
-# Dynamo data plane: etcd every dynamo worker registers in (must be reachable from
-# every worker host), the discovery namespace, and the KV block size shared by the
-# frontend (--kv-cache-block-size) and every worker (--block-size).
-DYNAMO_ETCD_ENDPOINTS = os.environ.get("DYNAMO_ETCD_ENDPOINTS", "http://143.248.74.105:2379")
-DYNAMO_NAMESPACE = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
-DYNAMO_KV_BLOCK_SIZE = int(os.environ.get("DYNAMO_KV_BLOCK_SIZE", "64"))
-# Worker-side port scheme (must match worker/manager.py): a node's `port` is the allocated
-# base slot; vLLM's API listens at +40000, a dynamo worker's system (health/metrics) port
-# at +10000 (Dynamo parses DYN_SYSTEM_PORT as i16, so +40000 is out of range).
-VLLM_API_PORT_OFFSET = 40000
-DYNAMO_SYSTEM_PORT_OFFSET = 10000
+# Data-plane topology, namespaces, port offsets and metric parsing all live in
+# central/dynamo.py so the deploy path and the metrics path cannot disagree.
+node_api_port = dynamo.node_api_port
 
-
-def node_api_port(dep: dict, node: dict) -> int:
-    off = DYNAMO_SYSTEM_PORT_OFFSET if dep.get("engine", "vllm") == "dynamo" else VLLM_API_PORT_OFFSET
-    return node["port"] + off
+# Deploy settings persisted with a deployment (and echoed back by the API), so a
+# deployment can be inspected and recreated without retyping its configuration.
+DEPLOY_CONFIG_KEYS = (
+    "max_len", "gpu_util", "extra_args", "image", "is_embedding",
+    "reasoning_parser", "tool_call_parser", "block_size", "tp",
+)
 
 # CI/CD self-update config.
 HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "")          # host path of the git checkout
@@ -189,16 +184,24 @@ class CentralManager:
             if "served_model_name" in r.keys() and r["served_model_name"]:
                 served_name = r["served_model_name"]
                 
+            conf = {}
+            if "config_json" in r.keys() and r["config_json"]:
+                try:
+                    conf = json.loads(r["config_json"])
+                except Exception:
+                    conf = {}
             deps.append({
+                **conf,
                 "id": r["id"],
                 "name": r["name"],
                 "model": r["model"],
                 "served_model_name": served_name,
-                "engine": r["engine"] if "engine" in r.keys() else "vllm",
+                "engine": r["engine"] if "engine" in r.keys() else dynamo.DEFAULT_ENGINE,
                 "deployment_type": r["deployment_type"],
                 "status": r["status"],
                 "gpus": json.loads(r["gpus_json"]) if r["gpus_json"] else [],
-                "nodes": json.loads(r["nodes_json"]) if r["nodes_json"] else []
+                "nodes": json.loads(r["nodes_json"]) if r["nodes_json"] else [],
+                "config": conf,
             })
         conn.close()
         return deps
@@ -208,10 +211,13 @@ class CentralManager:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM deployments")
         for d in deps:
+            conf = d.get("config") or {k: d[k] for k in DEPLOY_CONFIG_KEYS if k in d}
             cursor.execute('''
-                INSERT INTO deployments (id, name, model, served_model_name, engine, deployment_type, status, gpus_json, nodes_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]), d.get("engine", "vllm"), d["deployment_type"], d["status"], json.dumps(d["gpus"]), json.dumps(d.get("nodes", []))))
+                INSERT INTO deployments (id, name, model, served_model_name, engine, deployment_type, status, gpus_json, nodes_json, config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (d["id"], d["name"], d["model"], d.get("served_model_name", d["model"]),
+                  d.get("engine", dynamo.DEFAULT_ENGINE), d["deployment_type"], d["status"],
+                  json.dumps(d["gpus"]), json.dumps(d.get("nodes", [])), json.dumps(conf)))
         conn.commit()
         conn.close()
 
@@ -243,44 +249,21 @@ class CentralManager:
             raise
 
     # ── Dynamo data plane ────────────────────────────────────────────────────
-    # engine == "dynamo": the worker runs `python -m dynamo.vllm` (no uvicorn),
-    # registers in etcd, and the Dynamo frontend routes to it. No P2C router
-    # registration, plain-HTTP health on the worker's system port.
-    @staticmethod
-    def _infer_parsers(model: str) -> tuple:
-        m = (model or "").lower()
-        if "gpt-oss" in m:
-            return "gpt_oss", "harmony"
-        if "gemma-4" in m or "gemma4" in m:
-            return "gemma4", "gemma4"
-        if "qwen3" in m:
-            return "qwen3", "hermes"
-        if "deepseek-v4" in m:
-            return "deepseek_v4", "deepseek_v4"
-        return None, None
-
-    @staticmethod
-    def _dynamo_namespace(served_model_name: str) -> str:
-        """Dynamo allows ONE model per (namespace, component, endpoint): a second
-        model registering on `dynamo/backend/generate` fails with "a different
-        model is already registered there". So every served model gets its own
-        namespace, `<prefix>-<slug>`; the frontend runs unscoped and discovers
-        them all. Replicas of the same model share the namespace (= one pool)."""
-        slug = re.sub(r"[^a-z0-9]+", "-", (served_model_name or "model").lower()).strip("-")
-        return f"{DYNAMO_NAMESPACE}-{slug}"[:63]
-
+    # engine == "dynamo": the worker runs `python -m dynamo.vllm` (no uvicorn,
+    # no TLS), registers itself in etcd and is routed to by the Dynamo frontend.
+    # Everything topological (namespace, ports, parsers) comes from dynamo.py.
     def _dynamo_fields(self, req: dict, worker: dict) -> dict:
-        if req.get("engine") != "dynamo":
+        if req.get("engine", dynamo.DEFAULT_ENGINE) != "dynamo":
             return {}
-        rp, tp = self._infer_parsers(req.get("model", ""))
+        rp, tp = dynamo.infer_parsers(req.get("model", ""))
         served = req.get("served_model_name") or req.get("model", "")
         return {
             "advertise_host": worker["host"],
-            "etcd_endpoints": DYNAMO_ETCD_ENDPOINTS,
-            "namespace": self._dynamo_namespace(served),
+            "etcd_endpoints": dynamo.ETCD_ENDPOINT,
+            "namespace": dynamo.namespace_for(served),
             "reasoning_parser": req.get("reasoning_parser") or rp,
             "tool_call_parser": req.get("tool_call_parser") or tp,
-            "block_size": req.get("block_size") or DYNAMO_KV_BLOCK_SIZE,
+            "block_size": req.get("block_size") or dynamo.KV_BLOCK_SIZE,
             "is_embedding": bool(req.get("is_embedding")),
         }
 
@@ -305,18 +288,33 @@ class CentralManager:
                 raise Exception("Tensor Parallelism requires exactly 1, 2, 4, or 8 GPUs.")
 
 
+        config = {
+            "max_len": req.get("max_len"),
+            "gpu_util": req.get("gpu_util"),
+            "extra_args": req.get("extra_args"),
+            "image": req.get("image") or req.get("vllm_image"),
+            "is_embedding": bool(req.get("is_embedding")),
+            "reasoning_parser": req.get("reasoning_parser"),
+            "tool_call_parser": req.get("tool_call_parser"),
+            "block_size": req.get("block_size") or dynamo.KV_BLOCK_SIZE,
+            "tp": req.get("tp", 1),
+        }
+        if req.get("engine", dynamo.DEFAULT_ENGINE) == "dynamo" and not config["reasoning_parser"]:
+            config["reasoning_parser"], config["tool_call_parser"] = dynamo.infer_parsers(req["model"])
+
         dep = {
             "id": deploy_id,
             "name": req["name"],
             "deployment_type": req["deployment_type"],
             "model": req["model"],
             "served_model_name": req.get("served_model_name") or req["model"],
-            "is_embedding": False,
-            "engine": req.get("engine", "vllm"),
+            "engine": req.get("engine", dynamo.DEFAULT_ENGINE),
             "gpus": req["gpus"],
             "tp": req["tp"],
             "status": "starting",
-            "nodes": []
+            "nodes": [],
+            "config": config,
+            **config,
         }
 
         # Send deployment commands to workers.
@@ -342,14 +340,14 @@ class CentralManager:
                             "name": req["name"],
                             "model": req["model"],
                             "served_model_name": req.get("served_model_name") or req["model"],
-                            "is_embedding": False,
-                            "engine": req.get("engine", "vllm"),
+                            "is_embedding": bool(req.get("is_embedding")),
+                            "engine": req.get("engine", dynamo.DEFAULT_ENGINE),
                             "gpus": [gid], # ONLY send one GPU
                             "tp": 1,
                             "max_len": req.get("max_len"),
                             "gpu_util": req.get("gpu_util"),
                             "extra_args": req.get("extra_args"),
-                            "vllm_image": req.get("vllm_image") or None,
+                            "vllm_image": req.get("image") or req.get("vllm_image") or None,
                             **self._dynamo_fields(req, worker),
                         }
 
@@ -384,14 +382,14 @@ class CentralManager:
                     "name": req["name"],
                     "model": req["model"],
                     "served_model_name": req.get("served_model_name") or req["model"],
-                    "is_embedding": False,
-                    "engine": req.get("engine", "vllm"),
+                    "is_embedding": bool(req.get("is_embedding")),
+                    "engine": req.get("engine", dynamo.DEFAULT_ENGINE),
                     "gpus": gpus, # Send ALL selected GPUs
                     "tp": len(gpus), # Explicitly set TP to GPU count
                     "max_len": req.get("max_len"),
                     "gpu_util": req.get("gpu_util"),
                     "extra_args": req.get("extra_args"),
-                    "vllm_image": req.get("vllm_image") or None,
+                    "vllm_image": req.get("image") or req.get("vllm_image") or None,
                     **self._dynamo_fields(req, worker),
                 }
 
@@ -451,8 +449,6 @@ class CentralManager:
                     except Exception as e:
                         logger.error(f"Failed to stop deployment {deploy_id} on worker {wid}: {e}")
 
-        for node in dep.get("nodes", []):
-            await self._p2c_deregister(node["host"], node["port"])
         return True
 
     async def stop_replica(self, deploy_id: str, global_gpu_id: str):
@@ -476,13 +472,7 @@ class CentralManager:
 
             self.save_deployments(deps)
 
-        # Find the node for this GPU before making the worker call
         wid, gpu_idx = global_gpu_id.rsplit("-", 1)
-        removed_node = next(
-            (n for n in dep.get("nodes", []) if n.get("name", "").endswith(f"_{gpu_idx}")),
-            None,
-        )
-
         all_workers = self.get_workers()
         if wid in all_workers:
             worker = all_workers[wid]
@@ -493,8 +483,6 @@ class CentralManager:
                 except Exception as e:
                     logger.error(f"Failed to stop replica {global_gpu_id} of {deploy_id}: {e}")
 
-        if removed_node:
-            await self._p2c_deregister(removed_node["host"], removed_node["port"])
         return True
 
     async def stream_logs(self, deploy_id: str, container_name: Optional[str] = None):
@@ -567,76 +555,6 @@ class CentralManager:
             for task in tasks:
                 task.cancel()
 
-    # Retry budget shared by every register attempt: keep trying for ~30 min,
-    # then give up. Used to recover from cases like central booting while the
-    # router is still warming up (sync_p2c_workers would otherwise fail-fast
-    # and the healthy-state cache would never trigger a retry).
-    _P2C_REGISTER_TIMEOUT_S = 30 * 60
-    _P2C_REGISTER_MAX_BACKOFF_S = 30.0
-
-    async def _p2c_register(self, host: str, port: int):
-        """Register a worker with the P2C router, retrying with exponential
-        backoff for up to 30 minutes. Returns once registration succeeds
-        (200 or "already exists") or the deadline expires. Designed to be
-        scheduled via asyncio.create_task so the caller doesn't block."""
-        url = f"https://{host}:{port + 40000}"
-        deadline = time.time() + self._P2C_REGISTER_TIMEOUT_S
-        attempt = 0
-        while time.time() < deadline:
-            attempt += 1
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(
-                        f"{P2C_ROUTER_URL}/add_worker",
-                        params={"url": url},
-                        timeout=10.0,
-                    )
-                if resp.status_code == 200:
-                    suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
-                    logger.info(f"P2C: registered {url}{suffix}")
-                    return
-                if "already exists" in resp.text:
-                    logger.debug(f"P2C: {url} already registered")
-                    return
-                # 4xx other than already-exists is unlikely to recover — don't
-                # spend 30 min hammering a permanent error.
-                if 400 <= resp.status_code < 500:
-                    logger.warning(
-                        f"P2C: non-retryable {resp.status_code} for {url}: {resp.text}"
-                    )
-                    return
-                logger.debug(
-                    f"P2C: retry {attempt} for {url} got {resp.status_code} {resp.text}"
-                )
-            except Exception as e:
-                logger.debug(f"P2C: retry {attempt} for {url}: {e!r}")
-            # 2s → 4s → 8s → 16s → 30s (capped)
-            backoff = min(self._P2C_REGISTER_MAX_BACKOFF_S, 2 ** min(attempt, 4))
-            await asyncio.sleep(backoff)
-        logger.warning(f"P2C: giving up on {url} after {attempt} attempts (~30 min)")
-
-    async def _p2c_deregister(self, host: str, port: int):
-        url = f"https://{host}:{port + 40000}"
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(f"{P2C_ROUTER_URL}/remove_worker", params={"url": url}, timeout=10.0)
-            logger.info(f"P2C: deregistered {url}")
-        except Exception as e:
-            logger.warning(f"P2C: failed to deregister {url}: {e}")
-
-    async def sync_p2c_workers(self):
-        """Register all currently healthy deployment nodes with the P2C router.
-        Registration runs as fire-and-forget background tasks because each one
-        will retry for up to 30 minutes — awaiting them serially would block
-        startup behind every flaky network/router-warmup case."""
-        deps = self.load_deployments()
-        for dep in deps:
-            if dep.get("engine", "vllm") == "dynamo":
-                continue  # discovered via etcd, not the P2C router
-            for node in dep.get("nodes", []):
-                if node.get("is_healthy"):
-                    asyncio.create_task(self._p2c_register(node["host"], node["port"]))
-
     async def _check_node_ready(self, client, host: int, api_port: int, dep: dict) -> bool:
         """Liveness + readiness check.
 
@@ -646,27 +564,17 @@ class CentralManager:
         We additionally require /v1/models to list the served model, which only
         happens after the engine finishes initialization.
         """
-        engine = dep.get("engine", "vllm")
-        health_path = "/health" if engine == "vllm" else "/"
+        engine = dep.get("engine", dynamo.DEFAULT_ENGINE)
 
         if engine == "dynamo":
-            # Worker system port (plain HTTP): /health reports {"status":"ready"} only once
-            # the engine is loaded and its `generate` endpoint is registered in etcd.
-            try:
-                resp = await client.get(f"http://{host}:{api_port}/health", timeout=8.0)
-                return resp.status_code == 200 and resp.json().get("status") == "ready"
-            except Exception:
-                return False
+            return await dynamo.instance_health(client, f"http://{host}:{api_port}")
 
         try:
-            resp = await client.get(f"https://{host}:{api_port}{health_path}", timeout=8.0)
+            resp = await client.get(f"https://{host}:{api_port}/health", timeout=8.0)
             if resp.status_code != 200:
                 return False
         except Exception:
             return False
-
-        if engine != "vllm":
-            return True
 
         served_name = dep.get("served_model_name") or dep.get("model", "")
         try:
@@ -727,7 +635,7 @@ class CentralManager:
                 host, api_port, served_name = key
                 async with sem:
                     other = None
-                    if dep.get("engine", "vllm") != "dynamo":
+                    if not dynamo.is_dynamo(dep):
                         other = await self._node_serves_other_model(client, host, api_port, served_name)
                     if other is not None:
                         logger.info(
@@ -744,8 +652,6 @@ class CentralManager:
         # The old code mutated the list it loaded before the (multi-minute)
         # probe pass and wrote it back wholesale — clobbering any deploy/stop
         # that committed in between.
-        to_deregister: list = []  # (host, port)
-        to_register: list = []    # (host, port)
         async with self._dep_lock:
             deps = self.load_deployments()
             changed = False
@@ -758,7 +664,7 @@ class CentralManager:
                 for node_idx, node in enumerate(dep.get("nodes", [])):
                     key = (node["host"], node_api_port(dep, node), served_name)
                     res = results.get(key)
-                    if res == "other_model" and dep.get("engine", "vllm") == "dynamo":
+                    if res == "other_model" and dynamo.is_dynamo(dep):
                         res = None  # never computed for dynamo nodes
                     if res is None:
                         # Node appeared after the probe pass — next cycle covers it.
@@ -779,15 +685,10 @@ class CentralManager:
                             node["is_healthy"] = False
                             node["_fail_count"] = 0
                             changed = True
-                            if dep.get("engine", "vllm") != "dynamo":
-                                to_deregister.append((node["host"], node["port"]))
                     elif is_healthy:
                         if not node.get("is_healthy"):
                             node["is_healthy"] = True
                             changed = True
-                            # dynamo workers are discovered via etcd — nothing to register
-                            if dep.get("engine", "vllm") != "dynamo":
-                                to_register.append((node["host"], node["port"]))
                         node["_fail_count"] = 0
 
                     if not node.get("is_healthy"):
@@ -798,7 +699,6 @@ class CentralManager:
                     bad = dep["nodes"].pop(node_idx)
                     changed = True
                     logger.info(f"Pruned stale node {bad.get('name')} from deployment {dep['id']}")
-                    to_deregister.append((bad["host"], bad["port"]))
 
                 if all_healthy and dep["status"] == "starting" and dep.get("nodes"):
                     dep["status"] = "running"
@@ -806,17 +706,6 @@ class CentralManager:
 
             if changed:
                 self.save_deployments(deps)
-
-        # ── Phase 3: P2C router updates OUTSIDE the lock. ────────────────────
-        for host, port in to_deregister:
-            try:
-                await self._p2c_deregister(host, port)
-            except Exception:
-                pass
-        for host, port in to_register:
-            # Fire-and-forget — _p2c_register internally retries for up to
-            # 30 min; never block the health loop on a slow registration.
-            asyncio.create_task(self._p2c_register(host, port))
 
     # ── CI/CD: worker version tracking + rolling self-update ────────────────
     def _target_version_blocking(self) -> Optional[str]:
