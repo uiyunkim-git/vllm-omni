@@ -14,6 +14,7 @@ from here so the two can never disagree about a URL or a namespace again.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import re
 from typing import Dict, List, Optional
@@ -64,7 +65,14 @@ def namespace_for(served_model_name: str) -> str:
     namespace; the frontend discovers them all via --namespace-prefix.
     Replicas of one model share a namespace and form a single worker pool."""
     slug = re.sub(r"[^a-z0-9]+", "-", (served_model_name or "model").lower()).strip("-")
-    return f"{NAMESPACE_PREFIX}-{slug}"[:63]
+    ns = f"{NAMESPACE_PREFIX}-{slug}"
+    if len(ns) <= 63:
+        return ns
+    # Truncating alone would map two long names sharing a prefix onto the same
+    # namespace, and Dynamo rejects the second model with "a different model is
+    # already registered there". Keep the truncation readable but unique.
+    digest = hashlib.sha1(served_model_name.encode()).hexdigest()[:8]
+    return f"{ns[:63 - 9].rstrip('-')}-{digest}"
 
 
 def infer_parsers(model: str) -> tuple:

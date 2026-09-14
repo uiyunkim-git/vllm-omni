@@ -318,10 +318,11 @@ class CentralManager:
         }
 
         # Send deployment commands to workers.
-        # touched_wids tracks workers that received at least one deploy command,
-        # so a mid-sequence failure can roll back the replicas already started
-        # instead of leaving orphaned containers pinning GPUs.
-        touched_wids: set = set()
+        # `touched_wids` is the set our CALLER passed in: it records which
+        # workers already received a deploy command so a mid-sequence failure
+        # can roll those replicas back. Re-binding it here (it used to say
+        # `touched_wids = set()`) left the caller's set empty, so rollback never
+        # fired and a failed multi-GPU deploy leaked running containers.
         all_workers = self.get_workers()
         async with httpx.AsyncClient() as client:
             if req["deployment_type"] == "replicas":
