@@ -115,56 +115,44 @@ services:
     networks:
       vllm_network:
 
-  # Dynamo frontend: OpenAI-compatible ingress (Rust) + KV-aware router over all
-  # dynamo workers discovered in etcd. Replaces vllm_router_p2c once every model
-  # has moved to engine=dynamo (then this takes :11434). Same tailscale-route
-  # trick as the router so workers reachable only over the tailnet still work.
+  # Dynamo frontend: OpenAI-compatible ingress (Rust) + router over every dynamo
+  # worker discovered in etcd. Owns :11434 (taken over from vllm_router_p2c).
+  #
+  # HOST networking is required, not cosmetic: a worker streams its response back
+  # by connecting TO the frontend's advertised TCP address. On the bridge network
+  # the frontend advertised its container IP (172.18.0.x), which only workers on
+  # THIS host could reach — remote workers (heart3) failed with "Failed to create
+  # response stream: Connection timed out" while local ones worked.
   dynamo_frontend:
     image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
     container_name: vllm_omni_dynamo_frontend
     restart: unless-stopped
     depends_on:
-      - tailscale
       - etcd
-    cap_add:
-      - NET_ADMIN
+    network_mode: host
     user: "0:0"
-    ports:
-      # 11434 is the public inference port (moved here from vllm_router_p2c at the cutover).
-      - "${DYNAMO_FRONTEND_PORT:-11434}:8080"
     environment:
       - HOME=/root
       - DYN_DISCOVERY_BACKEND=etcd
-      - ETCD_ENDPOINTS=http://etcd:2379
+      - ETCD_ENDPOINTS=${DYNAMO_ETCD_ENDPOINTS:-http://127.0.0.1:2379}
       # No DYN_NAMESPACE here on purpose: the frontend stays UNscoped so it discovers
       # every model. Each served model lives in its own namespace
       # (`dynamo-<slug>`, see CentralManager._dynamo_namespace) because Dynamo allows
       # one model per (namespace, component, endpoint).
+      #
+      # Response-stream listener host is auto-detected from the host netns (this
+      # container runs with network_mode: host, so it picks a real host IP).
+      # Do NOT pin DYN_TCP_RESPONSE_STREAM_HOST to an IP literal: 1.4.2 then fails
+      # model registration with "Interface not found: <ip>".
+      - DYN_TCP_RESPONSE_STREAM_PORT=${DYNAMO_FRONTEND_RESP_PORT:-11436}
       - DYN_LOG=${DYNAMO_LOG:-info}
-      - TAILSCALE_GATEWAY_HOST=tailscale
-      - TAILSCALE_SUBNET=100.64.0.0/10
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        GW=$$(getent hosts $${TAILSCALE_GATEWAY_HOST} | awk '{print $$1}')
-        if [ -n "$$GW" ]; then
-          echo "Adding route $${TAILSCALE_SUBNET} via $$GW (tailscale gateway)"
-          ip route replace $${TAILSCALE_SUBNET} via $$GW || echo "route add failed (non-fatal)"
-        else
-          echo "WARN: tailscale host not resolvable, skipping route setup"
-        fi
-        exec "$$@"
-      - "--"
     command: >
       python3 -m dynamo.frontend
-      --http-port 8080
+      --http-port ${DYNAMO_FRONTEND_PORT:-11434}
       --namespace-prefix ${DYNAMO_NAMESPACE:-dynamo}
       --router-mode ${DYNAMO_ROUTER_MODE:-least-loaded}
       --kv-cache-block-size ${DYNAMO_KV_BLOCK_SIZE:-64}
       --migration-limit ${DYNAMO_MIGRATION_LIMIT:-3}
-    networks:
-      vllm_network:
 
   central:
     build:

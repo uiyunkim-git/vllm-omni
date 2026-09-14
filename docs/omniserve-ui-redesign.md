@@ -38,6 +38,20 @@ P2C 라우터(least_connections, circuit breaker, retry), 워커별 HTTPS 엔드
 - 카드가 아닌 리스트/테이블(사용자 선호), 가로 스크롤 금지, 15초 폴링 유지, 창(window) 선택 유지.
 - 용어: Router → Frontend, Worker(URL) → Instance(host:gpu), CB → 없음, Retry → Migration.
 
+## API 계약 (백엔드가 제공, UI가 소비) — 2026-09-12 확정
+
+| 엔드포인트 | 응답 |
+|---|---|
+| `GET /api/frontend` | `{url, healthy, router_mode, models:[{id, namespace, instances, ready}], metrics:{active_requests, queued_requests, requests_total, output_tokens_total}}` |
+| `GET /api/instances` | `[{deployment_id, deployment_name, model, served_model_name, engine, worker_id, host, gpu, system_url, healthy, running, waiting, kv_cache_usage_pct, inflight, requests_total, errors_total}]` |
+| `GET /api/deployments` | 기존 + `engine`, 배포 설정(`max_len, gpu_util, extra_args, is_embedding, reasoning_parser, tool_call_parser, block_size, image`), `nodes[].url`(system URL) |
+| `GET /api/prometheus_stats?window=&served_model_name=` | `{window_seconds, requests_window, rps_window, avg_latency_window_s, ttft_p50_s, ttft_p95_s, active_requests, queued_requests, per_worker:[{url,name,deployment_id,deployment_name,served_model_name,processed,processed_window,running,waiting,errors}], latency_histogram_window:[{le,count}], migrations_window, rejections_window, allowed_windows}` — `cb_*`, `retry*`, `decisions` 제거 |
+| `GET /api/rps_history?window=&served_model_name=` | 기존 형태 유지 |
+| `POST /api/deploy` | `{name, model, served_model_name?, deployment_type, gpus[], tp?, max_len?, gpu_util?, extra_args?, image?, is_embedding?, reasoning_parser?, tool_call_parser?}` — `engine`는 기본 `dynamo`(레거시 `vllm`만 허용) |
+| `GET /api/endpoints`, `/api/gpus`, `/api/version`, `POST /api/workers/{id}/update`, `/api/workers/update_all`, `/api/stop/...`, 로그/이미지/모델 다운로드 | 기존 유지 |
+
+용어: Router → Frontend, Worker(URL) → Instance, CB/Retry → 없음(Migration/Rejection으로 대체).
+
 ## 순서
 1. 백엔드 API 추가(읽기 전용)와 지표 재정의 → 2. Overview/Models 화면 → 3. Deploy 폼 → 4. Hosts 확장 → 5. 레거시 제거.
 각 단계 끝에 `tests/` e2e(프론트 health, 모델 목록, 배포→ready) 추가.
