@@ -1,24 +1,32 @@
 """Unit tests for worker/manager.py (WorkerManager) with docker/subprocess mocked.
 
-Covers:
-- port allocation: skipping ports used by prior deployments AND ports parsed
-  from `docker ps` (including the host = internal + 40000 offset mapping);
-- "address already in use" retry loop advancing to the next free port;
-- concurrent deploys serialized by _state_lock (distinct ports, both records
-  persisted to local_deployments.json);
-- stop_replica replica-id reconstruction for worker ids that themselves
-  contain '-' (e.g. "kbds-worker-4").
+Covers the Dynamo-native deploy path:
+- engine selection: default "dynamo", legacy "vllm", anything else rejected;
+- the four derived ports (system/rpc/response-stream/kv) reaching both the
+  rendered compose file and the host firewall rules;
+- TLS material generated ONLY for the legacy vLLM engine;
+- reapply_host_ports re-asserting firewall rules for dynamo deployments only;
+- port allocation (existing records + `docker ps`, incl. the +40000 host
+  mapping) and the "address already in use" retry loop;
+- concurrent deploys serialized by _state_lock;
+- stop_replica replica-id reconstruction for worker ids containing '-'.
+
+Real production jinja templates are rendered; no docker is ever invoked.
 """
 
 import json
+import re
 import subprocess as real_subprocess
 import threading
 from pathlib import Path
 
 import pytest
+import yaml
 from jinja2 import Environment, FileSystemLoader
 
 WORKER_DIR = Path(__file__).resolve().parents[2] / "worker"
+
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +75,19 @@ class FakeSubprocess:
             return self.docker_ps_output
         return ""
 
+    # -- helpers ------------------------------------------------------------
+    def ran(self, *prefix) -> list:
+        return [c for c in self.commands if c[: len(prefix)] == list(prefix)]
+
+    def firewall_ports(self) -> list:
+        """Ports of every `iptables -I INPUT ... --dport N` rule we emitted."""
+        ports = []
+        for cmd in self.commands:
+            if "nsenter" not in cmd:
+                continue
+            ports += [int(p) for p in re.findall(r"--dport (\d+)", cmd[-1])]
+        return sorted(set(ports))
+
 
 @pytest.fixture
 def make_manager(worker_manager_module, tmp_path, monkeypatch):
@@ -78,6 +99,7 @@ def make_manager(worker_manager_module, tmp_path, monkeypatch):
         monkeypatch.setattr(wm, "DATA_DIR", str(tmp_path))
         monkeypatch.setattr(wm, "subprocess", fake)
         monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "unit-test-token")
+        monkeypatch.setenv("WORKER_HOST", "10.0.0.7")
         mgr = wm.WorkerManager()
         # Point at the real production templates (constructor hardcodes
         # /app/templates) so rendering is exercised end-to-end.
@@ -88,28 +110,252 @@ def make_manager(worker_manager_module, tmp_path, monkeypatch):
 
 
 def _deploy_req(deploy_id="dep1", replica_id="dep1_w1_0", **overrides):
+    """A deploy request shaped exactly like central/manager.py sends one.
+
+    Note there is deliberately no "engine" key: the worker must default to
+    dynamo (worker/manager.py DEFAULT_ENGINE).
+    """
     req = {
         "deploy_id": deploy_id,
         "replica_id": replica_id,
         "name": "test",
-        "model": "org/test-model",
-        "served_model_name": "test-model",
+        "model": "openai/gpt-oss-120b",
+        "served_model_name": "openai/gpt-oss-120b",
         "is_embedding": False,
-        "engine": "vllm",
         "gpus": [0],
         "tp": 1,
-        "max_len": 4096,
+        "max_len": 32768,
         "gpu_util": 0.9,
         "extra_args": None,
         "vllm_image": None,
+        # dynamo fields (central/manager.py:_dynamo_fields)
+        "advertise_host": "10.0.0.7",
+        "etcd_endpoints": "http://143.248.74.105:2379",
+        "namespace": "dynamo-openai-gpt-oss-120b",
+        "reasoning_parser": "gpt_oss",
+        "tool_call_parser": "harmony",
+        "block_size": 64,
     }
     req.update(overrides)
     return req
 
 
+def _legacy_req(**overrides):
+    return _deploy_req(engine="vllm", model="org/test-model",
+                       served_model_name="test-model", **overrides)
+
+
 def _load_state(wm, tmp_path):
     with open(tmp_path / "local_deployments.json") as f:
         return json.load(f)
+
+
+def _compose_doc(tmp_path, replica_id="dep1_w1_0"):
+    return yaml.safe_load((tmp_path / f"run_{replica_id}" / "docker-compose.yml").read_text())
+
+
+def _env_map(doc, node_name):
+    out = {}
+    for entry in doc["services"][node_name]["environment"]:
+        key, _, value = str(entry).partition("=")
+        out[key] = value
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Engine selection
+# ---------------------------------------------------------------------------
+
+class TestEngineSelection:
+    def test_engine_defaults_to_dynamo(self, make_manager, tmp_path, worker_manager_module):
+        assert worker_manager_module.DEFAULT_ENGINE == "dynamo"
+        mgr, fake, wm = make_manager()
+        dep = mgr.deploy_model(_deploy_req())
+        assert dep["nodes"][0]["name"] == "dynamo_dep1_w1_0"
+        doc = _compose_doc(tmp_path)
+        assert doc["services"]["dynamo_dep1_w1_0"]["entrypoint"] == [
+            "python3", "-m", "dynamo.vllm"
+        ]
+
+    def test_default_image_is_the_dynamo_runtime(self, make_manager, worker_manager_module):
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_deploy_req())
+        (inspect,) = fake.ran("docker", "image", "inspect")
+        assert inspect[-1] == worker_manager_module.DYNAMO_IMAGE
+
+    def test_legacy_vllm_engine_still_supported(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        dep = mgr.deploy_model(_legacy_req())
+        assert dep["nodes"][0]["name"] == "vllm_dep1_w1_0"
+        (inspect,) = fake.ran("docker", "image", "inspect")
+        assert inspect[-1] == "vllm/vllm-openai:latest"
+
+    @pytest.mark.parametrize("engine", ["ollama", "sglang", "", "DYNAMO"])
+    def test_unknown_engine_rejected_before_any_side_effect(
+        self, make_manager, tmp_path, engine
+    ):
+        mgr, fake, wm = make_manager()
+        with pytest.raises(Exception, match="Unsupported engine"):
+            mgr.deploy_model(_deploy_req(engine=engine))
+        assert fake.commands == []
+        assert not (tmp_path / "local_deployments.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# TLS: legacy engine only
+# ---------------------------------------------------------------------------
+
+class TestTlsCertificates:
+    def test_dynamo_deploy_generates_no_certs(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_deploy_req())
+        assert fake.ran("openssl") == []
+        assert not (tmp_path / "run_dep1_w1_0" / "vllm.key").exists()
+
+    def test_legacy_vllm_deploy_generates_certs(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_legacy_req())
+        (openssl,) = fake.ran("openssl")
+        assert "-keyout" in openssl and "-out" in openssl
+        assert openssl[openssl.index("-keyout") + 1].endswith("vllm.key")
+
+
+# ---------------------------------------------------------------------------
+# Dynamo port derivation
+# ---------------------------------------------------------------------------
+
+class TestDynamoPortDerivation:
+    def test_compose_gets_the_three_listener_ports_and_the_kv_port(
+        self, make_manager, tmp_path, worker_manager_module
+    ):
+        wmod = worker_manager_module
+        mgr, fake, wm = make_manager()
+        dep = mgr.deploy_model(_deploy_req())
+        base = dep["ports"][0]
+        env = _env_map(_compose_doc(tmp_path), "dynamo_dep1_w1_0")
+        assert env["DYN_SYSTEM_PORT"] == str(base + wmod.DYNAMO_SYSTEM_PORT_OFFSET)
+        assert env["DYN_TCP_RPC_PORT"] == str(base + wmod.DYNAMO_RPC_PORT_OFFSET)
+        assert env["DYN_TCP_RESPONSE_STREAM_PORT"] == str(base + wmod.DYNAMO_RESP_PORT_OFFSET)
+        cmd = [str(c) for c in _compose_doc(tmp_path)["services"]["dynamo_dep1_w1_0"]["command"]]
+        kv = json.loads(cmd[cmd.index("--kv-events-config") + 1])
+        assert kv["endpoint"] == f"tcp://*:{base + wmod.DYNAMO_KV_PORT_OFFSET}"
+
+    def test_offsets_match_central(self, worker_manager_module, central_dynamo):
+        """worker/manager.py and central/dynamo.py must never disagree."""
+        wmod = worker_manager_module
+        assert wmod.DYNAMO_SYSTEM_PORT_OFFSET == central_dynamo.SYSTEM_PORT_OFFSET
+        assert wmod.DYNAMO_RPC_PORT_OFFSET == central_dynamo.RPC_PORT_OFFSET
+        assert wmod.DYNAMO_RESP_PORT_OFFSET == central_dynamo.RESP_PORT_OFFSET
+        assert wmod.DYNAMO_KV_PORT_OFFSET == central_dynamo.KV_PORT_OFFSET
+        assert wmod.HOST_PORT_OFFSET == central_dynamo.VLLM_API_PORT_OFFSET
+
+    def test_firewall_opened_for_all_four_ports(
+        self, make_manager, tmp_path, worker_manager_module
+    ):
+        """Host-network workers get no docker-published port rules, so the
+        agent inserts the INPUT ACCEPTs itself."""
+        wmod = worker_manager_module
+        mgr, fake, wm = make_manager()
+        dep = mgr.deploy_model(_deploy_req())
+        base = dep["ports"][0]
+        assert fake.firewall_ports() == sorted(
+            base + off
+            for off in (wmod.DYNAMO_SYSTEM_PORT_OFFSET, wmod.DYNAMO_RPC_PORT_OFFSET,
+                        wmod.DYNAMO_RESP_PORT_OFFSET, wmod.DYNAMO_KV_PORT_OFFSET)
+        )
+
+    def test_legacy_deploy_opens_no_firewall_rules(self, make_manager, tmp_path):
+        """Docker publishes the vLLM port itself (FORWARD chain)."""
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_legacy_req())
+        assert fake.firewall_ports() == []
+
+    def test_advertise_host_falls_back_to_worker_host_env(
+        self, make_manager, tmp_path, monkeypatch
+    ):
+        mgr, fake, wm = make_manager()
+        monkeypatch.setenv("WORKER_HOST", "192.168.1.50")  # after make_manager's default
+        req = _deploy_req()
+        req.pop("advertise_host")
+        mgr.deploy_model(req)
+        env = _env_map(_compose_doc(tmp_path), "dynamo_dep1_w1_0")
+        assert env["DYN_TCP_RPC_HOST"] == "192.168.1.50"
+
+    def test_namespace_and_etcd_are_passed_through(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_deploy_req(namespace="dynamo-my-model",
+                                     etcd_endpoints="http://etcd:2379"))
+        env = _env_map(_compose_doc(tmp_path), "dynamo_dep1_w1_0")
+        assert env["DYN_NAMESPACE"] == "dynamo-my-model"
+        assert env["ETCD_ENDPOINTS"] == "http://etcd:2379"
+
+    def test_embedding_deploy_renders_the_pooling_variant(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        mgr.deploy_model(_deploy_req(is_embedding=True))
+        cmd = [str(c) for c in _compose_doc(tmp_path)["services"]["dynamo_dep1_w1_0"]["command"]]
+        assert "--embedding-worker" in cmd
+        assert "--kv-events-config" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# reapply_host_ports (startup: firewall rules do not survive a host reboot)
+# ---------------------------------------------------------------------------
+
+class TestReapplyHostPorts:
+    def _seed(self, tmp_path, deps):
+        (tmp_path / "local_deployments.json").write_text(json.dumps(deps))
+
+    def test_only_dynamo_deployments_are_reapplied(self, make_manager, tmp_path,
+                                                   worker_manager_module):
+        wmod = worker_manager_module
+        mgr, fake, wm = make_manager()
+        self._seed(tmp_path, [
+            {"id": "a", "replica_id": "a_w_0", "ports": [21001],
+             "nodes": [{"name": "dynamo_a_w_0", "port": 21001}]},
+            {"id": "b", "replica_id": "b_w_0", "ports": [21002],
+             "nodes": [{"name": "vllm_b_w_0", "port": 21002}]},
+            {"id": "c", "replica_id": "c_w_0", "ports": [21003], "nodes": []},
+        ])
+        calls = []
+        mgr._ensure_host_ports_open = lambda ports, *a, **k: calls.append(sorted(ports))
+        mgr.reapply_host_ports()
+        assert calls == [sorted(
+            21001 + off
+            for off in (wmod.DYNAMO_SYSTEM_PORT_OFFSET, wmod.DYNAMO_RPC_PORT_OFFSET,
+                        wmod.DYNAMO_RESP_PORT_OFFSET, wmod.DYNAMO_KV_PORT_OFFSET)
+        )]
+
+    def test_multiple_dynamo_replicas_are_batched(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        self._seed(tmp_path, [
+            {"id": "a", "replica_id": "a_w_0", "ports": [21001],
+             "nodes": [{"name": "dynamo_a_w_0", "port": 21001}]},
+            {"id": "a", "replica_id": "a_w_1", "ports": [21002],
+             "nodes": [{"name": "dynamo_a_w_1", "port": 21002}]},
+        ])
+        calls = []
+        mgr._ensure_host_ports_open = lambda ports, *a, **k: calls.append(sorted(ports))
+        mgr.reapply_host_ports()
+        assert len(calls) == 1
+        assert len(calls[0]) == 8
+
+    def test_no_dynamo_deployments_means_no_call(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        self._seed(tmp_path, [
+            {"id": "b", "replica_id": "b_w_0", "ports": [21002],
+             "nodes": [{"name": "vllm_b_w_0", "port": 21002}]},
+        ])
+        calls = []
+        mgr._ensure_host_ports_open = lambda ports, *a, **k: calls.append(ports)
+        mgr.reapply_host_ports()
+        assert calls == []
+
+    def test_missing_state_file_is_harmless(self, make_manager, tmp_path):
+        mgr, fake, wm = make_manager()
+        calls = []
+        mgr._ensure_host_ports_open = lambda ports, *a, **k: calls.append(ports)
+        mgr.reapply_host_ports()
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +415,23 @@ class TestPortAllocation:
         assert dep["nodes"][0]["port"] == wm._PORT_START + 1
         # ports[] must record the port ACTUALLY bound after the retry, not the
         # originally allocated one — otherwise future allocations reserve the
-        # wrong port (fixed in _deploy_model_locked).
+        # wrong port.
         assert dep["ports"] == [wm._PORT_START + 1]
+
+    def test_retry_rewrites_the_derived_dynamo_ports(self, make_manager, tmp_path):
+        """The compose file must be re-rendered with the NEW base port, or the
+        instance would advertise ports derived from the abandoned one."""
+        def hook(cmd, attempt):
+            if attempt == 0:
+                return real_subprocess.CompletedProcess(
+                    cmd, 1, stdout="", stderr="Error: address already in use"
+                )
+            return real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mgr, fake, wm = make_manager(compose_up_hook=hook)
+        dep = mgr.deploy_model(_deploy_req())
+        env = _env_map(_compose_doc(tmp_path), "dynamo_dep1_w1_0")
+        assert env["DYN_SYSTEM_PORT"] == str(dep["ports"][0] + wm.DYNAMO_SYSTEM_PORT_OFFSET)
 
     def test_non_port_error_fails_immediately_and_cleans_up(
         self, make_manager, tmp_path
@@ -201,7 +462,7 @@ class TestPortAllocation:
 
         fake.run = run
         with pytest.raises(Exception, match="not found on this worker"):
-            mgr.deploy_model(_deploy_req(vllm_image="vllm/vllm-openai:v0.99"))
+            mgr.deploy_model(_deploy_req(vllm_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:9.9"))
         assert all("compose" not in c for c in fake.commands)
 
 
@@ -253,8 +514,8 @@ class TestConcurrentDeploys:
 class TestStopReplica:
     def _seed(self, tmp_path, replica_id, deploy_id="dep1"):
         (tmp_path / "local_deployments.json").write_text(json.dumps([
-            {"id": deploy_id, "replica_id": replica_id,
-             "ports": [21001], "nodes": [{"name": f"vllm_{replica_id}", "port": 21001}]},
+            {"id": deploy_id, "replica_id": replica_id, "ports": [21001],
+             "nodes": [{"name": f"dynamo_{replica_id}", "port": 21001}]},
         ]))
         # stop paths only run `docker compose down` when the compose file exists
         run_dir = tmp_path / f"run_{replica_id}"
@@ -314,3 +575,31 @@ class TestStopDeployment:
     def test_unknown_deploy_returns_false(self, make_manager, tmp_path):
         mgr, fake, wm = make_manager()
         assert mgr.stop_deployment("ghost") is False
+
+
+# ---------------------------------------------------------------------------
+# Image listing (both engine families)
+# ---------------------------------------------------------------------------
+
+class TestImageListing:
+    def test_lists_dynamo_and_vllm_images_only(self, make_manager):
+        mgr, fake, wm = make_manager()
+        listing = (
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2\t20.6GB\t2026-09-01\n"
+            "vllm/vllm-openai:latest\t19GB\t2026-08-01\n"
+            "alpine:3.20\t7MB\t2026-01-01\n"
+        )
+
+        def run(cmd, **kw):
+            fake.commands.append(list(cmd))
+            if cmd[:2] == ["docker", "images"]:
+                return real_subprocess.CompletedProcess(cmd, 0, stdout=listing, stderr="")
+            return real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        fake.run = run
+        images = mgr.list_vllm_images()
+        assert [i["name"] for i in images] == [
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2",
+            "vllm/vllm-openai:latest",
+        ]
+        assert [i["engine"] for i in images] == ["dynamo", "vllm"]

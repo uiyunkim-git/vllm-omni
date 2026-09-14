@@ -1,0 +1,35 @@
+# Trimmed capture of one dynamo.vllm worker's system port /metrics
+# (base port 21001 -> system port 31001). Two sources on one endpoint:
+#   dynamo_component_*  Dynamo-side request handling, per registered endpoint
+#   vllm:*              the engine itself (queue depth, KV cache usage)
+# HELP dynamo_component_requests_total Requests handled by this component endpoint
+# TYPE dynamo_component_requests_total counter
+dynamo_component_requests_total{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate"} 830
+dynamo_component_requests_total{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="load_metrics"} 99999
+
+# TYPE dynamo_component_errors_total counter
+dynamo_component_errors_total{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate"} 2
+dynamo_component_errors_total{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="clear_kv_blocks"} 7
+
+# TYPE dynamo_component_inflight_requests gauge
+dynamo_component_inflight_requests{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate"} 3
+
+# TYPE dynamo_component_request_duration_seconds histogram
+dynamo_component_request_duration_seconds_bucket{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate",le="1"} 300
+dynamo_component_request_duration_seconds_bucket{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate",le="+Inf"} 830
+dynamo_component_request_duration_seconds_sum{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate"} 2481.25
+dynamo_component_request_duration_seconds_count{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend",dynamo_endpoint="generate"} 830
+
+# TYPE dynamo_component_uptime_seconds gauge
+dynamo_component_uptime_seconds{dynamo_namespace="dynamo-openai-gpt-oss-120b",dynamo_component="backend"} 7200.5
+
+# HELP vllm:num_requests_running Number of requests currently running on GPU
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="openai/gpt-oss-120b"} 3
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="openai/gpt-oss-120b"} 5
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc{model_name="openai/gpt-oss-120b"} 0.42
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="openai/gpt-oss-120b"} 1048576
