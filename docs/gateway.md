@@ -77,11 +77,11 @@ docker compose -f docker-compose.worker.yml up -d worker
 
 ### 현재 설정 (2026-09-15 적용)
 
-앞단(사내/공유기) 프록시가 TLS를 종료하므로 **게이트웨이는 평문 80번**만 띄운다: `.env`의 `GATEWAY_SITE=:80`,
-`CADDY_AUTO_HTTPS=off`. 따라서 포워딩은 **외부 443 → `143.248.74.105:80`** 한 줄이면 되고, 인증서는 앞단에서 관리한다.
+TLS·인증서는 전부 앞단 프록시가 처리한다. 이 서버는 **평문 HTTP만** 띄우고, 흔한 포트를 피해 **18080**을 쓴다
+(`.env`의 `GATEWAY_SITE=:18080`, `CADDY_AUTO_HTTPS=off`). 앞단 프록시의 전달 대상은 **`143.248.74.105:18080`** 한 곳이다.
 Caddy는 `trusted_proxies static private_ranges`로 앞단이 넘기는 `X-Forwarded-For/Proto`를 신뢰해 실제 클라이언트 IP를 남긴다.
 
-검증(모두 `http://143.248.74.105/`):
+검증(모두 `http://143.248.74.105:18080/`):
 
 | 확인 | 결과 |
 |---|---|
@@ -92,4 +92,4 @@ Caddy는 `trusted_proxies static private_ranges`로 앞단이 넘기는 `X-Forwa
 | `/health` | 200 (무인증) |
 | 대시보드 API·정적파일·내장 프록시 | 전부 200 |
 
-자체 인증서로 바꾸고 싶어지면 `GATEWAY_SITE=<도메인>` + `CADDY_AUTO_HTTPS=on`으로만 바꾸면 된다(위 4단계 참고).
+어떤 Host 헤더로 와도 그대로 서빙하므로 도메인이 바뀌어도 이 서버는 건드릴 것이 없다.
