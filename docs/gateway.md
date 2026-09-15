@@ -75,4 +75,21 @@ docker compose -f docker-compose.worker.yml up -d worker
 **외부로는 443(+80)만 포워딩할 것.** 8080·11434·8085·2379·31xxx·33xxx·63xxx·65xxx는 내부 전용이다
 (특히 :8085는 GPU 워크로드를 띄우고 죽일 수 있고, :2379는 디스커버리 저장소다).
 
-도메인이 준비되기 전에는 `GATEWAY_SITE` 기본값 `:8443`으로 평문 HTTP로 뜬다(`http://143.248.74.105:8443`).
+### 현재 설정 (2026-09-15 적용)
+
+앞단(사내/공유기) 프록시가 TLS를 종료하므로 **게이트웨이는 평문 80번**만 띄운다: `.env`의 `GATEWAY_SITE=:80`,
+`CADDY_AUTO_HTTPS=off`. 따라서 포워딩은 **외부 443 → `143.248.74.105:80`** 한 줄이면 되고, 인증서는 앞단에서 관리한다.
+Caddy는 `trusted_proxies static private_ranges`로 앞단이 넘기는 `X-Forwarded-For/Proto`를 신뢰해 실제 클라이언트 IP를 남긴다.
+
+검증(모두 `http://143.248.74.105/`):
+
+| 확인 | 결과 |
+|---|---|
+| `/v1/chat/completions` 키 없이 | 401 |
+| `/v1/chat/completions` Bearer 키 | 200 |
+| `/` 인증 없이 | 401 |
+| `/` admin 로그인 | 200 |
+| `/health` | 200 (무인증) |
+| 대시보드 API·정적파일·내장 프록시 | 전부 200 |
+
+자체 인증서로 바꾸고 싶어지면 `GATEWAY_SITE=<도메인>` + `CADDY_AUTO_HTTPS=on`으로만 바꾸면 된다(위 4단계 참고).

@@ -12,9 +12,15 @@
 # to multi-second generations — see docs/gateway.md for the measurement.
 {
 	admin off
-	# Set GATEWAY_DOMAIN to enable automatic HTTPS (Let's Encrypt). Until then we
-	# serve plain HTTP on GATEWAY_PORT so nothing depends on DNS existing yet.
+	# TLS is terminated by the proxy in front of this site, so we serve plain HTTP
+	# on GATEWAY_SITE (":80" by default). Point GATEWAY_SITE at a domain and set
+	# CADDY_AUTO_HTTPS=on to have Caddy obtain its own certificates instead.
 	auto_https {$CADDY_AUTO_HTTPS:off}
+	servers {
+		# Behind a TLS-terminating proxy: take the real client IP and scheme from
+		# its X-Forwarded-* headers instead of logging the proxy itself.
+		trusted_proxies static private_ranges
+	}
 }
 
 {$GATEWAY_SITE::8443} {
