@@ -21,6 +21,7 @@ CENTRAL_URL = os.environ.get("CENTRAL_URL", "http://central:8080")
 WORKER_ID = os.environ.get("WORKER_ID", socket.gethostname())
 WORKER_HOST = os.environ.get("WORKER_HOST", socket.gethostbyname(socket.gethostname()))
 WORKER_PORT = int(os.environ.get("WORKER_PORT", 8081))
+RECONCILE_PERIOD_S = int(os.environ.get("RECONCILE_PERIOD_S", "60"))
 
 class WorkerDeployRequest(BaseModel):
     deploy_id: str
@@ -54,6 +55,7 @@ class DownloadModelRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(register_loop())
+    asyncio.create_task(reconcile_loop())
 
 async def register_loop():
     while True:
@@ -75,6 +77,19 @@ async def register_loop():
             logger.error(f"Failed to register with central server: {e}")
             
         await asyncio.sleep(10)
+
+async def reconcile_loop():
+    """Bring back engine containers that died and stayed dead — most often a host
+    reboot where the NVIDIA driver was not loaded yet when docker started them.
+    Cheap (one `docker inspect` per local deployment) and a no-op when healthy."""
+    while True:
+        try:
+            restarted = await asyncio.to_thread(manager.reconcile_local_deployments)
+            if restarted:
+                logger.warning(f"Reconcile restarted engine containers: {restarted}")
+        except Exception as e:
+            logger.error(f"reconcile_loop error: {e}")
+        await asyncio.sleep(RECONCILE_PERIOD_S)
 
 @app.get("/api/internal/version")
 async def get_version():

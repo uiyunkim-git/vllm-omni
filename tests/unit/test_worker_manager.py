@@ -603,3 +603,87 @@ class TestImageListing:
             "vllm/vllm-openai:latest",
         ]
         assert [i["engine"] for i in images] == ["dynamo", "vllm"]
+
+
+# ── Reconcile: bring back engine containers that died and stayed dead ────────
+# After a host reboot the NVIDIA driver is often not loaded when docker starts
+# the engine containers; they exit 128 and docker's `unless-stopped` eventually
+# gives up, leaving the gateway with no workers and nobody to fix it.
+
+def _dep_record(replica_id, name, port=21001):
+    return {"id": replica_id.split("_")[0], "replica_id": replica_id, "ports": [port],
+            "nodes": [{"name": name, "port": port}]}
+
+
+def _write_compose(tmp_path, replica_id):
+    d = tmp_path / f"run_{replica_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "docker-compose.yml").write_text("services: {}\n")
+
+
+class _InspectAware(FakeSubprocess):
+    """FakeSubprocess that answers `docker inspect -f {{.State.Running}}`."""
+
+    def __init__(self, running_by_name):
+        super().__init__()
+        self.running_by_name = running_by_name
+
+    def run(self, cmd, **kwargs):
+        if cmd[:2] == ["docker", "inspect"] and "{{.State.Running}}" in cmd:
+            self.commands.append(list(cmd))
+            name = cmd[-1]
+            if name not in self.running_by_name:
+                return real_subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no such object")
+            value = "true" if self.running_by_name[name] else "false"
+            return real_subprocess.CompletedProcess(cmd, 0, stdout=value + "\n", stderr="")
+        return super().run(cmd, **kwargs)
+
+
+class TestReconcile:
+    def test_restarts_only_the_stopped_container(self, make_manager, tmp_path, monkeypatch,
+                                                 worker_manager_module):
+        mgr, _fake, wm = make_manager()
+        fake = _InspectAware({"dynamo_a": True, "dynamo_b": False})
+        monkeypatch.setattr(wm, "subprocess", fake)
+        monkeypatch.setattr(mgr, "load_local_deployments",
+                            lambda: [_dep_record("a", "dynamo_a"), _dep_record("b", "dynamo_b")])
+        _write_compose(tmp_path, "a")
+        _write_compose(tmp_path, "b")
+
+        assert mgr.reconcile_local_deployments() == ["b"]
+
+        ups = [c for c in fake.commands if c[:2] == ["docker", "compose"] and "up" in c]
+        assert len(ups) == 1
+        assert "vllm_b" in ups[0]
+
+    def test_skips_when_the_compose_file_is_gone(self, make_manager, tmp_path, monkeypatch,
+                                                 worker_manager_module):
+        mgr, _fake, wm = make_manager()
+        fake = _InspectAware({"dynamo_c": False})
+        monkeypatch.setattr(wm, "subprocess", fake)
+        monkeypatch.setattr(mgr, "load_local_deployments", lambda: [_dep_record("c", "dynamo_c")])
+        # no compose file written for replica "c"
+
+        assert mgr.reconcile_local_deployments() == []
+        assert not [c for c in fake.commands if c[:2] == ["docker", "compose"]]
+
+    def test_missing_container_counts_as_stopped(self, make_manager, tmp_path, monkeypatch,
+                                                 worker_manager_module):
+        mgr, _fake, wm = make_manager()
+        fake = _InspectAware({})  # docker inspect fails: container removed entirely
+        monkeypatch.setattr(wm, "subprocess", fake)
+        monkeypatch.setattr(mgr, "load_local_deployments", lambda: [_dep_record("d", "dynamo_d")])
+        _write_compose(tmp_path, "d")
+
+        assert mgr.reconcile_local_deployments() == ["d"]
+
+    def test_survives_an_unreachable_docker(self, make_manager, monkeypatch, worker_manager_module):
+        mgr, _fake, wm = make_manager()
+
+        class Boom(FakeSubprocess):
+            def run(self, cmd, **kwargs):
+                raise OSError("docker socket gone")
+
+        monkeypatch.setattr(wm, "subprocess", Boom())
+        monkeypatch.setattr(mgr, "load_local_deployments", lambda: [_dep_record("e", "dynamo_e")])
+        assert mgr.reconcile_local_deployments() == []

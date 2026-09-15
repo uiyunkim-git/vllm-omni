@@ -78,6 +78,49 @@ class WorkerManager:
         except Exception as e:
             logger.warning(f"startup firewall re-apply skipped: {e}")
 
+    # ── Self-healing ───────────────────────────────────────────────────────
+    # Docker's `unless-stopped` gives up after its own retry budget. After a host
+    # reboot the NVIDIA driver is often not loaded yet when docker starts the
+    # engine containers, so every one of them dies with
+    #   nvidia-container-cli: initialization error: nvml error: driver not loaded
+    # and STAYS dead — central still believes the deployment exists and nobody
+    # brings it back (this took the whole gateway down on 2026-09-15). Reconcile
+    # what is actually running against what this worker was told to run.
+    def reconcile_local_deployments(self) -> list:
+        """Re-`compose up` any locally recorded deployment whose container is not
+        running. Returns the replica ids it restarted."""
+        restarted = []
+        for dep in self.load_local_deployments():
+            replica_id = dep.get("replica_id") or dep.get("id")
+            nodes = dep.get("nodes") or []
+            if not replica_id or not nodes:
+                continue
+            name = nodes[0].get("name", "")
+            try:
+                out = subprocess.run(
+                    ["docker", "inspect", "-f", "{{.State.Running}}", name],
+                    capture_output=True, text=True, timeout=20,
+                )
+                running = out.returncode == 0 and out.stdout.strip() == "true"
+            except Exception:
+                continue  # docker unreachable — try again next tick
+            if running:
+                continue
+            compose_path = os.path.join(DATA_DIR, f"run_{replica_id}", "docker-compose.yml")
+            if not os.path.exists(compose_path):
+                logger.warning(f"reconcile: {name} is down but {compose_path} is gone; leaving it to central")
+                continue
+            logger.warning(f"reconcile: {name} is not running — bringing it back up")
+            r = subprocess.run(
+                ["docker", "compose", "-p", f"vllm_{replica_id}", "-f", compose_path, "up", "-d"],
+                capture_output=True, text=True, timeout=600,
+            )
+            if r.returncode == 0:
+                restarted.append(replica_id)
+            else:
+                logger.error(f"reconcile: failed to restart {name}: {(r.stderr or r.stdout).strip()[:300]}")
+        return restarted
+
     def reapply_host_ports(self) -> None:
         ports = []
         for dep in self.load_local_deployments():
