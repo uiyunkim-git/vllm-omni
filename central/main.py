@@ -376,8 +376,19 @@ def _instance_rows() -> list:
     return rows
 
 
+def _public_base_url(request: Request) -> str:
+    fwd_host = request.headers.get("x-forwarded-host") or ""
+    if not fwd_host:
+        # Direct hit on central; the gateway (and any proxy in front of it) always
+        # sets X-Forwarded-*.
+        return dynamo.FRONTEND_URL
+    host = fwd_host.split(",")[0].strip()
+    proto = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
+    return f"{proto}://{host}"
+
+
 @app.get("/api/frontend")
-async def get_frontend_status():
+async def get_frontend_status(request: Request):
     """Health + discovered models of the Dynamo frontend (the single ingress)."""
     healthy, models = False, []
     async with httpx.AsyncClient() as client:
@@ -417,6 +428,12 @@ async def get_frontend_status():
         })
     return {
         "url": dynamo.FRONTEND_URL,
+        # What a client outside should call. When the dashboard is reached through
+        # the gateway, /v1 lives on that same origin, so the examples must show the
+        # domain the operator actually typed — not central's view of the frontend.
+        # Absent forwarding headers the page is central itself (:8080), which serves
+        # no /v1, so we fall back to the frontend's own address.
+        "public_url": _public_base_url(request),
         "healthy": healthy,
         "router_mode": os.environ.get("DYNAMO_ROUTER_MODE", "least-loaded"),
         "kv_block_size": dynamo.KV_BLOCK_SIZE,

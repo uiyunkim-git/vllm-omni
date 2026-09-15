@@ -386,10 +386,14 @@ function fmtNum(v) {
     return String(Math.round(n));
 }
 
-// Browser-reachable base URL of the Dynamo frontend. `/api/frontend` reports the
-// URL as *central* reaches it, which can be a loopback address — in that case we
-// keep the port but swap in the host the browser is already talking to.
+// Base URL a client outside should call. Through the gateway the dashboard and
+// /v1 share one origin, so central reports that origin as `public_url` (derived
+// from the X-Forwarded-* headers) and every example on this page uses it — the
+// domain the operator typed, not an internal IP. Falls back to central's view of
+// the frontend when the page is opened directly on central.
 function frontendBaseUrl() {
+    const pub = frontendInfo && frontendInfo.public_url;
+    if (pub) return String(pub).replace(/\/+$/, '');
     const raw = frontendInfo && frontendInfo.url;
     if (raw) {
         try {

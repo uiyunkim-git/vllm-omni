@@ -93,3 +93,18 @@ Caddy는 `trusted_proxies static private_ranges`로 앞단이 넘기는 `X-Forwa
 | 대시보드 API·정적파일·내장 프록시 | 전부 200 |
 
 어떤 Host 헤더로 와도 그대로 서빙하므로 도메인이 바뀌어도 이 서버는 건드릴 것이 없다.
+
+### 대시보드가 보여주는 엔드포인트 주소
+
+API 페이지의 base URL·curl/Python 예시는 **접속한 주소 그대로** 나온다: 도메인으로 들어오면 `https://도메인/v1`,
+IP로 들어오면 `http://143.248.74.105:18080/v1`. central이 `X-Forwarded-Host/Proto`로 공개 주소를 계산해
+(`/api/frontend`의 `public_url`) UI가 그걸 쓴다.
+
+그러려면 **앞단 프록시의 IP가 Caddy의 신뢰 목록에 있어야 한다.** 기본값은 사설 대역 + 교내 `143.248.0.0/16`이고,
+프록시가 그 밖에 있으면 `.env`에 추가한다:
+
+```
+GATEWAY_TRUSTED_PROXIES=private_ranges 143.248.0.0/16 <프록시 IP 또는 CIDR>
+```
+
+신뢰하지 않으면 Caddy가 `X-Forwarded-Proto`를 자기가 받은 값(`http`)으로 덮어써서 예시가 `http://`로 나온다.

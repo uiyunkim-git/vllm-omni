@@ -17,9 +17,13 @@
 	# CADDY_AUTO_HTTPS=on to have Caddy obtain its own certificates instead.
 	auto_https {$CADDY_AUTO_HTTPS:off}
 	servers {
-		# Behind a TLS-terminating proxy: take the real client IP and scheme from
-		# its X-Forwarded-* headers instead of logging the proxy itself.
-		trusted_proxies static private_ranges
+		# Behind a TLS-terminating proxy: take the real client IP and the original
+		# scheme/host from its X-Forwarded-* headers instead of overwriting them.
+		# The dashboard uses that to print endpoint examples with the domain the
+		# operator actually typed, so the proxy's address MUST be listed here —
+		# otherwise Caddy rewrites X-Forwarded-Proto to "http" and the examples
+		# come out as http://. Default covers private ranges plus the campus /16.
+		trusted_proxies static {$GATEWAY_TRUSTED_PROXIES:private_ranges 143.248.0.0/16}
 	}
 }
 
