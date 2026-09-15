@@ -23,6 +23,17 @@ app = FastAPI()
 manager = CentralManager()
 
 templates = Jinja2Templates(directory="frontend")
+
+def _asset_version() -> str:
+    """Cache-buster for /static/app.js. Without it a browser keeps running the
+    previous bundle after a deploy — which is how the API page kept calling the
+    old cross-origin URL and failing with "Failed to fetch" long after the fix."""
+    try:
+        return str(int(os.path.getmtime("frontend/static/app.js")))
+    except OSError:
+        return "0"
+
+templates.env.globals["asset_version"] = _asset_version()
 app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
 
 class DeployRequest(BaseModel):
