@@ -36,6 +36,16 @@
 	# ── Inference API ───────────────────────────────────────────────────────
 	@api path /v1/*
 	handle @api {
+		# Embedding responses are multi-MB of JSON floats and compress ~4x. The
+		# proxy in front of us moves bytes far slower than this host does, so the
+		# wire size — not our hop — is what a client waits on. Matched on
+		# Content-Type so `text/event-stream` (streaming chat) is never buffered.
+		encode zstd gzip {
+			match {
+				header Content-Type application/json*
+			}
+		}
+
 		@unauthorized not header Authorization "Bearer {$OMNI_API_KEY}"
 		respond @unauthorized `{"error":{"message":"invalid api key","type":"invalid_request_error","code":"invalid_api_key"}}` 401 {
 			close
@@ -58,6 +68,9 @@
 
 	# ── Dashboard ───────────────────────────────────────────────────────────
 	handle {
+		# Dashboard payloads (JSON metrics, app.js) — same reasoning as above.
+		encode zstd gzip
+
 		basic_auth {
 			admin {$ADMIN_PASSWORD_HASH}
 		}
