@@ -1,0 +1,61 @@
+# One entry point for the whole platform: the dashboard and the inference API on
+# a single host:port (and, once a domain points here, a single domain).
+#
+#   /v1/*            → Dynamo frontend (:11434)  — machine clients, Bearer key
+#   /health          → Dynamo frontend           — unauthenticated liveness probe
+#   everything else  → central dashboard (:8080) — humans, HTTP basic auth
+#
+# Why a proxy at all: the Dynamo frontend cannot serve the dashboard and central
+# must NOT sit in front of inference (a Python hop in the LLM path is exactly the
+# bottleneck this platform removed). Caddy is an event-driven Go proxy: it adds
+# well under a millisecond and streams SSE without buffering, which is noise next
+# to multi-second generations — see docs/gateway.md for the measurement.
+{
+	admin off
+	# Set GATEWAY_DOMAIN to enable automatic HTTPS (Let's Encrypt). Until then we
+	# serve plain HTTP on GATEWAY_PORT so nothing depends on DNS existing yet.
+	auto_https {$CADDY_AUTO_HTTPS:off}
+}
+
+{$GATEWAY_SITE::8443} {
+	log {
+		output stderr
+		format console
+	}
+
+	# ── Inference API ───────────────────────────────────────────────────────
+	@api path /v1/*
+	handle @api {
+		@unauthorized not header Authorization "Bearer {$OMNI_API_KEY}"
+		respond @unauthorized `{"error":{"message":"invalid api key","type":"invalid_request_error","code":"invalid_api_key"}}` 401 {
+			close
+		}
+		reverse_proxy {$DYNAMO_FRONTEND_ADDR:127.0.0.1:11434} {
+			# Generations run for minutes at high concurrency; do not cut them off.
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+				dial_timeout 10s
+			}
+		}
+	}
+
+	# Liveness of the inference plane, deliberately without a key so uptime
+	# checks and load balancers can use it.
+	handle /health {
+		reverse_proxy {$DYNAMO_FRONTEND_ADDR:127.0.0.1:11434}
+	}
+
+	# ── Dashboard ───────────────────────────────────────────────────────────
+	handle {
+		basic_auth {
+			admin {$ADMIN_PASSWORD_HASH}
+		}
+		reverse_proxy {$CENTRAL_ADDR:127.0.0.1:8080} {
+			transport http {
+				read_timeout 10m
+				write_timeout 10m
+			}
+		}
+	}
+}

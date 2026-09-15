@@ -50,13 +50,15 @@ class Endpoint:
                 self.ssl.check_hostname = False
                 self.ssl.verify_mode = ssl.CERT_NONE
 
-    def request_bytes(self, path, payload):
+    def request_bytes(self, path, payload, api_key=None):
         body = json.dumps(payload).encode()
+        auth = f"Authorization: Bearer {api_key}\r\n" if api_key else ""
         head = (
             f"POST {self.path_prefix}{path} HTTP/1.1\r\n"
             f"Host: {self.host}:{self.port}\r\n"
             "Content-Type: application/json\r\n"
             "Accept: application/json\r\n"
+            f"{auth}"
             f"Content-Length: {len(body)}\r\n\r\n"
         ).encode()
         return head + body
@@ -207,7 +209,7 @@ def build_payloads(a):
 async def run(a):
     ep = Endpoint(a.url, a.insecure)
     payloads = build_payloads(a)
-    reqs = [ep.request_bytes("/v1/chat/completions", p) for p in payloads]
+    reqs = [ep.request_bytes("/v1/chat/completions", p, a.api_key) for p in payloads]
     lat = []
     errs = {}
     stats = {"ok": 0, "completion_tokens": 0, "prompt_tokens": 0}
@@ -301,6 +303,7 @@ def main():
     ap.add_argument("--prompt", default="Explain in three sentences why the sky is blue.")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--insecure", action="store_true", help="skip TLS verify (self-signed workers)")
+    ap.add_argument("--api-key", default=None, help="sent as `Authorization: Bearer <key>` (the gateway requires it)")
     ap.add_argument("--workload", choices=["simple", "believe"], default="simple",
                     help="believe = production job shape (Harmony prefix + abstract, reasoning high, no max_tokens unless >0)")
     ap.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None,

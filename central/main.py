@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from manager import CentralManager
+from manager import CentralManager, WORKER_HEADERS
 import dynamo
 import logging
 import os
@@ -644,6 +644,7 @@ async def get_worker_images(worker_id: str):
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"http://{worker['host']}:{worker['port']}/api/internal/images",
+                headers=WORKER_HEADERS,
                 timeout=10.0
             )
             if resp.status_code == 404:
@@ -673,7 +674,8 @@ async def pull_worker_image(worker_id: str, request: Request):
                 async with client.stream(
                     "POST",
                     f"http://{worker['host']}:{worker['port']}/api/internal/images/pull",
-                    json={"image": image}
+                    headers=WORKER_HEADERS,
+                    json={"image": image},
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
                         yield chunk
@@ -692,6 +694,7 @@ async def get_worker_models(worker_id: str):
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"http://{worker['host']}:{worker['port']}/api/internal/models",
+                headers=WORKER_HEADERS,
                 timeout=30.0
             )
             if resp.status_code == 404:
@@ -718,6 +721,7 @@ async def download_worker_model(worker_id: str, request: Request):
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"http://{worker['host']}:{worker['port']}/api/internal/models/download",
+                headers=WORKER_HEADERS,
                 json={"model_id": model_id, "force": force},
                 timeout=10.0
             )
@@ -736,6 +740,7 @@ async def get_worker_model_jobs(worker_id: str):
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"http://{worker['host']}:{worker['port']}/api/internal/models/jobs",
+                headers=WORKER_HEADERS,
                 timeout=5.0
             )
             resp.raise_for_status()
@@ -757,7 +762,8 @@ async def stream_worker_job_logs(worker_id: str, job_id: str, offset: int = 0):
                 async with client.stream(
                     "GET",
                     f"http://{worker['host']}:{worker['port']}/api/internal/models/jobs/{job_id}/logs",
-                    params={"offset": offset}
+                    headers=WORKER_HEADERS,
+                    params={"offset": offset},
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
                         yield chunk

@@ -32,6 +32,10 @@ DEPLOY_CONFIG_KEYS = (
 HOST_REPO_DIR = os.environ.get("HOST_REPO_DIR", "")          # host path of the git checkout
 HOST_GIT_DIR = os.environ.get("HOST_GIT_DIR", "")            # real git dir if submodule/worktree
 WORKER_BRANCH = os.environ.get("WORKER_BRANCH", "main")
+# Shared secret for the worker agents' control API (see worker/main.py). Sent on
+# every call; harmless for agents that do not enforce it yet.
+WORKER_API_KEY = os.environ.get("WORKER_API_KEY", "").strip()
+WORKER_HEADERS = {"Authorization": f"Bearer {WORKER_API_KEY}"} if WORKER_API_KEY else {}
 WORKER_AUTO_UPDATE = os.environ.get("WORKER_AUTO_UPDATE", "0") == "1"
 GIT_IMAGE = os.environ.get("GIT_IMAGE", "alpine/git")
 
@@ -353,7 +357,7 @@ class CentralManager:
                         }
 
                         touched_wids.add(wid)
-                        resp = await client.post(worker_url, json=worker_req, timeout=600.0)
+                        resp = await client.post(worker_url, headers=WORKER_HEADERS, json=worker_req, timeout=600.0)
                         if resp.status_code != 200:
                             raise Exception(f"Failed to deploy replica on worker {wid} GPU {gid}: {resp.text}")
                         
@@ -395,7 +399,7 @@ class CentralManager:
                 }
 
                 touched_wids.add(wid)
-                resp = await client.post(worker_url, json=worker_req, timeout=600.0)
+                resp = await client.post(worker_url, headers=WORKER_HEADERS, json=worker_req, timeout=600.0)
                 if resp.status_code != 200:
                     raise Exception(f"Failed to deploy TP model on worker {wid}: {resp.text}")
                 
@@ -446,7 +450,7 @@ class CentralManager:
                     worker = all_workers[wid]
                     worker_url = f"http://{worker['host']}:{worker['port']}/api/internal/stop/{deploy_id}"
                     try:
-                        await client.post(worker_url, timeout=60.0)
+                        await client.post(worker_url, headers=WORKER_HEADERS, timeout=60.0)
                     except Exception as e:
                         logger.error(f"Failed to stop deployment {deploy_id} on worker {wid}: {e}")
 
@@ -487,7 +491,7 @@ class CentralManager:
             worker_url = f"http://{worker['host']}:{worker['port']}/api/internal/stop_replica/{deploy_id}/{global_gpu_id}"
             async with httpx.AsyncClient() as client:
                 try:
-                    await client.post(worker_url, timeout=60.0)
+                    await client.post(worker_url, headers=WORKER_HEADERS, timeout=60.0)
                 except Exception as e:
                     logger.error(f"Failed to stop replica {global_gpu_id} of {deploy_id}: {e}")
 
@@ -531,7 +535,7 @@ class CentralManager:
                 try:
                     timeout = httpx.Timeout(connect=15.0, read=None, write=10.0, pool=10.0)
                     async with httpx.AsyncClient(timeout=timeout) as client:
-                        async with client.stream("GET", worker_url) as response:
+                        async with client.stream("GET", worker_url, headers=WORKER_HEADERS) as response:
                             if response.status_code != 200:
                                 err_msg = await response.aread()
                                 await queue.put(f"data: [Central-Error] Worker {wid} returned {response.status_code}: {err_msg.decode('utf-8')}\n\n")
@@ -787,7 +791,8 @@ class CentralManager:
         url = f"http://{w['host']}:{w['port']}/api/internal/self_update"
         self._update_cooldown[worker_id] = time.time()
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json={"branch": branch or WORKER_BRANCH}, timeout=30.0)
+            resp = await client.post(url, json={"branch": branch or WORKER_BRANCH},
+                                     headers=WORKER_HEADERS, timeout=30.0)
         if resp.status_code != 200:
             raise Exception(f"Worker {worker_id} update failed ({resp.status_code}): {resp.text}")
         return resp.json()

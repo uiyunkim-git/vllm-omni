@@ -19,6 +19,9 @@ services:
       # plain clone). Compute with: git rev-parse --git-common-dir (absolute).
       - HOST_GIT_DIR=${HOST_GIT_DIR:-}
       - WORKER_BRANCH=${WORKER_BRANCH:-main}
+      # Shared secret this agent requires on its control API. Unset = open (so a
+      # host that has not been given the key yet keeps working); set it in .env.
+      - WORKER_API_KEY=${OMNI_API_KEY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./worker/main.py:/app/main.py

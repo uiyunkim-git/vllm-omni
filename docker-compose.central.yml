@@ -108,6 +108,33 @@ services:
       --kv-cache-block-size ${DYNAMO_KV_BLOCK_SIZE:-64}
       --migration-limit ${DYNAMO_MIGRATION_LIMIT:-3}
 
+  # ── Single entry point ───────────────────────────────────────────────────
+  # One host:port (and, with GATEWAY_SITE, one domain) serving BOTH the
+  # dashboard and the inference API. See gateway/Caddyfile and docs/gateway.md.
+  gateway:
+    image: caddy:2-alpine
+    container_name: vllm_omni_gateway
+    restart: unless-stopped
+    depends_on:
+      - dynamo_frontend
+    # Host networking: it proxies to the frontend (host netns, :11434) and to
+    # central (:8080 published on the host), and keeps the client IP intact.
+    network_mode: host
+    env_file: .env.gateway
+    environment:
+      # ":8443" (default) = plain HTTP on that port. Set GATEWAY_SITE to a
+      # domain (e.g. "omni.example.ac.kr") plus CADDY_AUTO_HTTPS=on to get
+      # automatic Let's Encrypt certificates on 443.
+      - GATEWAY_SITE=${GATEWAY_SITE:-:8443}
+      - CADDY_AUTO_HTTPS=${CADDY_AUTO_HTTPS:-off}
+      - OMNI_API_KEY=${OMNI_API_KEY:?set OMNI_API_KEY in .env}
+      - DYNAMO_FRONTEND_ADDR=${DYNAMO_FRONTEND_ADDR:-127.0.0.1:11434}
+      - CENTRAL_ADDR=${CENTRAL_ADDR:-127.0.0.1:8080}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
   central:
     build:
       context: ./central
@@ -127,6 +154,8 @@ services:
       - WORKER_BRANCH=${WORKER_BRANCH:-main}
       # Opt-in rolling auto-update of drifted, idle workers. Default OFF.
       - WORKER_AUTO_UPDATE=${WORKER_AUTO_UPDATE:-0}
+      # Shared secret presented to the worker agents' control API.
+      - WORKER_API_KEY=${OMNI_API_KEY:-}
       # Dynamo data plane (engine=dynamo deployments)
       - DYNAMO_ETCD_ENDPOINTS=${DYNAMO_ETCD_ENDPOINTS:-http://143.248.74.105:2379}
       - DYNAMO_NAMESPACE=${DYNAMO_NAMESPACE:-dynamo}
@@ -145,6 +174,8 @@ services:
 volumes:
   tailscale-state:
   etcd-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   vllm_network:

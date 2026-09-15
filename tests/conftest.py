@@ -197,6 +197,9 @@ def central_main(central_dynamo) -> types.ModuleType:
     """central/main.py imported with a fake manager (no sqlite, no docker)."""
     fake_manager_mod = types.ModuleType("manager")
     fake_manager_mod.CentralManager = FakeCentralManager
+    # main.py imports this constant to authenticate its worker-proxy calls; the
+    # fake module has to mirror manager's public surface.
+    fake_manager_mod.WORKER_HEADERS = {}
 
     saved_manager = sys.modules.get("manager")
     sys.modules["manager"] = fake_manager_mod
