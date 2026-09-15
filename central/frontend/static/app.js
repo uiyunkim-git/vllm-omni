@@ -989,7 +989,9 @@ window.gwRunTest = async function () {
     const abortController = new AbortController();
     gwTestAbort = abortController;
 
-    const url = `${frontendBaseUrl()}${kind === 'embedding' ? '/v1/embeddings' : '/v1/chat/completions'}`;
+    // Same-origin proxy: the Dynamo frontend sends no CORS headers, so a direct
+    // browser fetch to :11434 fails with "Failed to fetch". Central forwards it.
+    const url = `/api/gateway${kind === 'embedding' ? '/v1/embeddings' : '/v1/chat/completions'}`;
     const buildPayload = () => kind === 'embedding'
         ? { model: modelId, input }
         : { model: modelId, messages: [{ role: 'user', content: input }] };

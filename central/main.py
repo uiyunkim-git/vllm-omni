@@ -401,6 +401,36 @@ async def get_frontend_status():
     }
 
 
+@app.api_route("/api/gateway/{path:path}", methods=["GET", "POST"])
+async def gateway_proxy(path: str, request: Request):
+    """Same-origin proxy to the Dynamo frontend for the browser.
+
+    The frontend speaks no CORS (1.4.2 has no option for it) and the old Rust
+    router did, so the dashboard's API page and its load tester started failing
+    with "Failed to fetch" the moment the browser called :11434 cross-origin.
+    Server-side clients should keep calling the frontend directly — this exists
+    only so the UI can stay same-origin.
+    """
+    url = f"{dynamo.FRONTEND_URL}/{path.lstrip('/')}"
+    headers = {}
+    auth = request.headers.get("authorization")
+    if auth:
+        headers["authorization"] = auth
+    body = await request.body()
+    if body:
+        headers["content-type"] = request.headers.get("content-type", "application/json")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)) as client:
+            r = await client.request(request.method, url, content=body or None, headers=headers,
+                                     params=dict(request.query_params))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"frontend unreachable: {e}")
+    return JSONResponse(
+        status_code=r.status_code,
+        content=r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text},
+    )
+
+
 @app.get("/api/instances")
 async def get_instances():
     return _instance_rows()
