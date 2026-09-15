@@ -40,7 +40,9 @@
 		# proxy in front of us moves bytes far slower than this host does, so the
 		# wire size — not our hop — is what a client waits on. Matched on
 		# Content-Type so `text/event-stream` (streaming chat) is never buffered.
-		encode zstd gzip {
+		encode {
+			zstd better
+			gzip
 			match {
 				header Content-Type application/json*
 			}
