@@ -22,6 +22,24 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 manager = CentralManager()
 
+# Central's own API can start and stop GPU workloads, so the gateway (which has
+# already checked the dashboard's basic auth) forwards the shared key with every
+# request and central refuses anyone else. Off by default because a host whose
+# worker has not been given the key yet would stop registering; turn it on with
+# CENTRAL_REQUIRE_KEY=1 once every worker sends it.
+CENTRAL_API_KEY = os.environ.get("WORKER_API_KEY", "").strip()
+CENTRAL_REQUIRE_KEY = os.environ.get("CENTRAL_REQUIRE_KEY", "0") == "1" and bool(CENTRAL_API_KEY)
+
+
+@app.middleware("http")
+async def require_key(request: Request, call_next):
+    if CENTRAL_REQUIRE_KEY and request.url.path.startswith("/api/"):
+        auth = request.headers.get("authorization", "")
+        presented = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-omni-key", "")
+        if presented != CENTRAL_API_KEY:
+            return JSONResponse({"detail": "invalid or missing api key"}, status_code=401)
+    return await call_next(request)
+
 templates = Jinja2Templates(directory="frontend")
 
 def _asset_version() -> str:

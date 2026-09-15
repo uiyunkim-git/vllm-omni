@@ -27,6 +27,9 @@ RECONCILE_PERIOD_S = int(os.environ.get("RECONCILE_PERIOD_S", "60"))
 # so it must not be open. Enforcement is skipped when unset, which keeps a host
 # that has not been given the key yet working instead of bricking it.
 WORKER_API_KEY = os.environ.get("WORKER_API_KEY", "").strip()
+# Presented to central on the heartbeat so central can refuse unauthenticated
+# callers once every host has the key (CENTRAL_REQUIRE_KEY=1 there).
+CENTRAL_HEADERS = {"Authorization": f"Bearer {WORKER_API_KEY}"} if WORKER_API_KEY else {}
 
 
 async def require_api_key(request: Request) -> None:
@@ -85,7 +88,8 @@ async def register_loop():
                 "version": manager.get_version(),
             }
             async with httpx.AsyncClient() as client:
-                await client.post(f"{CENTRAL_URL}/api/internal/register_node", json=payload, timeout=5.0)
+                await client.post(f"{CENTRAL_URL}/api/internal/register_node", json=payload,
+                                  headers=CENTRAL_HEADERS, timeout=5.0)
             logger.info(f"Registered with central server at {CENTRAL_URL}")
         except Exception as e:
             logger.error(f"Failed to register with central server: {e}")

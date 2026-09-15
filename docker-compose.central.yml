@@ -156,6 +156,9 @@ services:
       - WORKER_AUTO_UPDATE=${WORKER_AUTO_UPDATE:-0}
       # Shared secret presented to the worker agents' control API.
       - WORKER_API_KEY=${OMNI_API_KEY:-}
+      # 1 = refuse /api/* without the shared key (the gateway injects it). Turn on
+      # only after every worker host has OMNI_API_KEY, or they stop registering.
+      - CENTRAL_REQUIRE_KEY=${CENTRAL_REQUIRE_KEY:-0}
       # Dynamo data plane (engine=dynamo deployments)
       - DYNAMO_ETCD_ENDPOINTS=${DYNAMO_ETCD_ENDPOINTS:-http://143.248.74.105:2379}
       - DYNAMO_NAMESPACE=${DYNAMO_NAMESPACE:-dynamo}
