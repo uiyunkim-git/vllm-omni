@@ -960,8 +960,16 @@ window.gwRunTest = async function () {
     if (!modelId) return;
     const kind = gwEndpointKind(modelId);
     const input = document.getElementById('gw-test-input').value;
-    const total = Math.max(1, parseInt(document.getElementById('gw-test-total').value, 10) || 1);
-    const concurrency = Math.max(1, Math.min(total, parseInt(document.getElementById('gw-test-concurrency').value, 10) || 1));
+    // Hard caps. A browser opens only a handful of connections per origin, so a
+    // large "concurrency" here does not load the server — it queues inside the
+    // tab and starves the dashboard's own polling, which looks like the whole UI
+    // freezing. Real load tests belong on the CLI against the gateway.
+    const MAX_TOTAL = 500, MAX_CONCURRENCY = 32;
+    const total = Math.min(MAX_TOTAL, Math.max(1, parseInt(document.getElementById('gw-test-total').value, 10) || 1));
+    const concurrency = Math.min(MAX_CONCURRENCY, total,
+        Math.max(1, parseInt(document.getElementById('gw-test-concurrency').value, 10) || 1));
+    document.getElementById('gw-test-total').value = String(total);
+    document.getElementById('gw-test-concurrency').value = String(concurrency);
     const apiKey = (document.getElementById('gw-api-key')?.value || '').trim();
 
     const btn = document.getElementById('gw-test-btn');

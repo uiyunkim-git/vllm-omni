@@ -430,15 +430,36 @@ async def get_frontend_status():
     }
 
 
+# Shared connection pool and in-flight cap for the browser proxy below.
+_GATEWAY_PROXY_CONCURRENCY = int(os.environ.get("GATEWAY_PROXY_CONCURRENCY", "32"))
+_GATEWAY_SEM = asyncio.Semaphore(_GATEWAY_PROXY_CONCURRENCY)
+_GATEWAY_CLIENT: Optional[httpx.AsyncClient] = None
+
+
+def _gateway_client() -> httpx.AsyncClient:
+    global _GATEWAY_CLIENT
+    if _GATEWAY_CLIENT is None:
+        _GATEWAY_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=60.0),
+            limits=httpx.Limits(max_connections=_GATEWAY_PROXY_CONCURRENCY * 2,
+                                max_keepalive_connections=_GATEWAY_PROXY_CONCURRENCY),
+        )
+    return _GATEWAY_CLIENT
+
+
 @app.api_route("/api/gateway/{path:path}", methods=["GET", "POST"])
 async def gateway_proxy(path: str, request: Request):
-    """Same-origin proxy to the Dynamo frontend for the browser.
+    """Same-origin proxy to the Dynamo frontend, for the browser only.
 
-    The frontend speaks no CORS (1.4.2 has no option for it) and the old Rust
-    router did, so the dashboard's API page and its load tester started failing
-    with "Failed to fetch" the moment the browser called :11434 cross-origin.
-    Server-side clients should keep calling the frontend directly — this exists
-    only so the UI can stay same-origin.
+    The frontend speaks no CORS (1.4.2 has no option for it), so the dashboard's
+    API page would otherwise fail with "Failed to fetch". Server-side clients
+    must keep calling the frontend directly — this hop is a convenience, not a
+    load path.
+
+    Two guards, both learned the hard way when someone ran the API page's tester
+    at 1024 concurrency: a SHARED client (a fresh AsyncClient per request opens a
+    fresh pool every time) and a semaphore, so proxied inference can never starve
+    the event loop that also serves the dashboard's own endpoints.
     """
     url = f"{dynamo.FRONTEND_URL}/{path.lstrip('/')}"
     headers = {}
@@ -449,9 +470,11 @@ async def gateway_proxy(path: str, request: Request):
     if body:
         headers["content-type"] = request.headers.get("content-type", "application/json")
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)) as client:
-            r = await client.request(request.method, url, content=body or None, headers=headers,
-                                     params=dict(request.query_params))
+        async with _GATEWAY_SEM:
+            r = await _gateway_client().request(
+                request.method, url, content=body or None, headers=headers,
+                params=dict(request.query_params),
+            )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"frontend unreachable: {e}")
     return JSONResponse(

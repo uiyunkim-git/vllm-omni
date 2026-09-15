@@ -218,12 +218,17 @@
                         </div>
                         <div>
                             <label class="form-label small fw-semibold mb-1">Total requests</label>
-                            <input type="number" class="form-control form-control-sm" id="gw-test-total" value="20" min="1" max="10000">
+                            <input type="number" class="form-control form-control-sm" id="gw-test-total" value="20" min="1" max="500">
                         </div>
                         <div>
                             <label class="form-label small fw-semibold mb-1">Concurrency</label>
-                            <input type="number" class="form-control form-control-sm" id="gw-test-concurrency" value="5" min="1" max="500">
+                            <input type="number" class="form-control form-control-sm" id="gw-test-concurrency" value="5" min="1" max="32">
                         </div>
+                    </div>
+                    <div class="form-text mb-2" style="font-size:.78rem">
+                        브라우저는 한 출처에 소수의 연결만 열 수 있어 동시성은 32까지만 받습니다 — 이 도구는 동작 확인용입니다.
+                        실제 부하 시험은 게이트웨이에 직접 쏘세요:
+                        <code>tests/bench_concurrency.py --url http://&lt;host&gt;:18080 --api-key &lt;key&gt; --concurrency 2048</code>
                     </div>
                     <div class="d-flex gap-2">
                         <button class="btn btn-sm btn-primary flex-grow-1" onclick="gwRunTest()" id="gw-test-btn">
