@@ -6,6 +6,7 @@ import shutil
 import asyncio
 import threading
 import uuid
+import time
 from datetime import datetime
 from pydantic import BaseModel
 from typing import List, Optional
@@ -65,6 +66,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 class WorkerManager:
     def __init__(self):
         self.env = Environment(loader=FileSystemLoader('/app/templates'))
+        self._gpu_cache: list = []      # last GPUs we could see
+        self._gpu_probe_at: float = 0.0  # monotonic time of the last per-device sweep
         # Serializes deploy/stop state mutations. Deploys now run in worker
         # threads (asyncio.to_thread), so two concurrent deploys would race the
         # read-allocate-write of local_deployments.json and both pick the same
@@ -132,36 +135,84 @@ class WorkerManager:
         if ports:
             self._ensure_host_ports_open(ports)
 
-    def get_gpu_status(self):
+    # nvidia-smi is queried through a throwaway container because this agent
+    # has no driver tooling of its own. `--gpus all` enumerates every device, so
+    # a SINGLE unhealthy GPU makes the whole call fail and the node reports zero
+    # GPUs — which is how one wedged card on heart3 hid four healthy A100s and
+    # made the node undeployable. When that happens, fall back to asking about
+    # one device at a time and keep whatever answers.
+    GPU_QUERY = ['--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu',
+                 '--format=csv,noheader,nounits']
+    GPU_PROBE_PERIOD_S = 300   # the per-device sweep is slow; don't run it every heartbeat
+    GPU_PROBE_MAX = 16
+    GPU_PROBE_GIVE_UP = 4      # consecutive misses that mean we are past the last device
+
+    def _query_gpus(self, device: Optional[int] = None, timeout: int = 60) -> Optional[list]:
+        """Ask nvidia-smi about one device, or all of them when `device` is None.
+
+        Returns the parsed rows, or None when the query itself failed — the
+        caller needs that distinction to tell "no GPUs here" from "ask again
+        differently".
+        """
+        spec = 'all' if device is None else f'device={device}'
         try:
-            # We use the docker socket to spin up a tiny container to query the host's GPUs since the worker container doesn't have nvidia-smi
-            # timeout guards against a wedged docker daemon — without it the
-            # heartbeat loop would block forever and central would mark this
-            # worker dead until a manual restart.
             result = subprocess.run(
-                ['docker', 'run', '--rm', '--gpus', 'all', '--entrypoint', 'nvidia-smi', 'vllm/vllm-openai:latest', '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=60
+                ['docker', 'run', '--rm', '--gpus', spec, '--entrypoint', 'nvidia-smi',
+                 'vllm/vllm-openai:latest'] + self.GPU_QUERY,
+                capture_output=True, text=True, timeout=timeout
             )
-            if result.returncode != 0:
-                logger.error(f"Docker nvidia-smi failed: {result.stderr}")
-            else:
-                logger.info(f"Docker nvidia-smi STDOUT: {result.stdout}")
-            gpus = []
-            for line in result.stdout.strip().split('\n'):
-                if not line: continue
-                parts = [x.strip() for x in line.split(',')]
+        except Exception as e:
+            logger.error(f"nvidia-smi query ({spec}) raised: {e}")
+            return None
+        if result.returncode != 0:
+            logger.warning(f"nvidia-smi query ({spec}) failed: {result.stderr.strip()[:200]}")
+            return None
+        gpus = []
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = [x.strip() for x in line.split(',')]
+            try:
                 gpus.append({
                     "id": int(parts[0]),
                     "name": parts[1],
                     "memory_total": int(parts[2]),
                     "memory_used": int(parts[3]),
                     "memory_free": int(parts[4]),
-                    "utilization": int(parts[5])
+                    "utilization": int(parts[5]),
                 })
+            except (IndexError, ValueError) as e:
+                logger.warning(f"unparsable nvidia-smi row {line!r}: {e}")
+        return gpus
+
+    def _probe_gpus_individually(self) -> list:
+        """One query per device index, skipping the ones that error out."""
+        found, misses = [], 0
+        for i in range(self.GPU_PROBE_MAX):
+            rows = self._query_gpus(i, timeout=20)
+            if rows:
+                found.extend(rows)
+                misses = 0
+            else:
+                misses += 1
+                if misses >= self.GPU_PROBE_GIVE_UP and found:
+                    break
+        logger.info(f"per-device GPU probe found {len(found)} healthy GPUs")
+        return found
+
+    def get_gpu_status(self):
+        gpus = self._query_gpus()
+        if gpus is not None:
+            self._gpu_cache = gpus
             return gpus
-        except Exception as e:
-            logger.error(f"Exception in get_gpu_status: {e}")
-            return []
+
+        # Degraded: at least one device is unhealthy. Sweep per device, but not
+        # on every heartbeat — the sweep costs one container start per index.
+        now = time.monotonic()
+        if now - self._gpu_probe_at >= self.GPU_PROBE_PERIOD_S or not self._gpu_cache:
+            self._gpu_probe_at = now
+            self._gpu_cache = self._probe_gpus_individually()
+        return self._gpu_cache
 
     # ── Self-update (CI/CD) ────────────────────────────────────────────────
     def get_version(self) -> dict:
