@@ -87,7 +87,10 @@ services:
 {% endif %}
 {% if extra_args %}
 {% for arg in extra_args %}
-      - "{{ arg }}"
+      {# tojson, not a bare "…": an arg may itself contain double quotes
+         (any JSON-valued flag such as --pooler-config), and wrapping those
+         in double quotes produces YAML that silently loses them. #}
+      - {{ arg | tojson }}
 {% endfor %}
 {% endif %}
     deploy:
