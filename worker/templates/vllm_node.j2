@@ -45,7 +45,10 @@ services:
 {% endif %}
 {% if extra_args %}
 {% for arg in extra_args %}
-      - "{{ arg }}"
+      {# tojson for the same reason as dynamo_node.j2: a JSON-valued flag
+         (--hf-overrides, --pooler-config) carries double quotes of its own,
+         and wrapping those in double quotes silently drops them. #}
+      - {{ arg | tojson }}
 {% endfor %}
 {% endif %}
     deploy:
